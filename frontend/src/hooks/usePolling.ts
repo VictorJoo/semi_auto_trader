@@ -1,15 +1,9 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 
 export function usePolling(callback: () => void, intervalMs: number) {
-  const saved = useRef(callback)
-
   useEffect(() => {
-    saved.current = callback
-  }, [callback])
-
-  useEffect(() => {
-    saved.current()
-    const id = window.setInterval(() => saved.current(), intervalMs)
+    callback()
+    const id = window.setInterval(callback, intervalMs)
     return () => window.clearInterval(id)
-  }, [intervalMs])
+  }, [callback, intervalMs])
 }

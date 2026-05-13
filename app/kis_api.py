@@ -116,6 +116,13 @@ class KisApiClient:
         return response
 
     def get_domestic_price(self, symbol: str) -> int:
+        output = self.get_domestic_quote(symbol)
+        price = output.get("stck_prpr")
+        if not price:
+            raise RuntimeError(f"KIS price response missing stck_prpr: {output}")
+        return int(float(price))
+
+    def get_domestic_quote(self, symbol: str) -> dict[str, Any]:
         params = {
             "FID_COND_MRKT_DIV_CODE": "J",
             "FID_INPUT_ISCD": symbol,
@@ -127,12 +134,156 @@ class KisApiClient:
         )
         if str(response.get("rt_cd", "0")) != "0":
             message = response.get("msg1") or response.get("msg_cd") or response
-            raise RuntimeError(f"KIS price rejected: {message}")
-        output = response.get("output") or {}
-        price = output.get("stck_prpr")
-        if not price:
-            raise RuntimeError(f"KIS price response missing stck_prpr: {response}")
-        return int(price)
+            raise RuntimeError(f"KIS quote rejected: {message}")
+        return response.get("output") or {}
+
+    def get_domestic_daily_candles(
+        self,
+        symbol: str,
+        *,
+        period_code: str = "D",
+        days_back: int = 60,
+        adjusted: bool = True,
+    ) -> list[dict[str, Any]]:
+        today = datetime.now()
+        start = today - timedelta(days=days_back)
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_DATE_1": start.strftime("%Y%m%d"),
+            "FID_INPUT_DATE_2": today.strftime("%Y%m%d"),
+            "FID_PERIOD_DIV_CODE": period_code,
+            "FID_ORG_ADJ_PRC": "0" if adjusted else "1",
+        }
+        response = self._get(
+            "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+            params,
+            headers=self._auth_headers("FHKST03010100"),
+        )
+        if str(response.get("rt_cd", "0")) != "0":
+            message = response.get("msg1") or response.get("msg_cd") or response
+            raise RuntimeError(f"KIS daily candles rejected: {message}")
+        rows: list[dict[str, Any]] = []
+        for row in response.get("output2") or []:
+            date_str = row.get("stck_bsop_date") or ""
+            close = row.get("stck_clpr")
+            if len(date_str) != 8 or not close:
+                continue
+            try:
+                close_value = float(close)
+            except (TypeError, ValueError):
+                continue
+            try:
+                volume = int(float(row.get("acml_vol") or 0))
+            except (TypeError, ValueError):
+                volume = 0
+            rows.append(
+                {
+                    "date": f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}",
+                    "close": close_value,
+                    "volume": volume,
+                }
+            )
+        rows.sort(key=lambda item: item["date"])
+        return rows
+
+    def get_domestic_minute_candles(
+        self,
+        symbol: str,
+        *,
+        end_hhmmss: str | None = None,
+        include_past_day: bool = True,
+    ) -> list[dict[str, Any]]:
+        if end_hhmmss is None:
+            end_hhmmss = datetime.now().strftime("%H%M%S")
+        params = {
+            "FID_ETC_CLS_CODE": "",
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+            "FID_INPUT_HOUR_1": end_hhmmss,
+            "FID_PW_DATA_INCU_YN": "Y" if include_past_day else "N",
+        }
+        response = self._get(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+            params,
+            headers=self._auth_headers("FHKST03010200"),
+        )
+        if str(response.get("rt_cd", "0")) != "0":
+            message = response.get("msg1") or response.get("msg_cd") or response
+            raise RuntimeError(f"KIS minute candles rejected: {message}")
+        rows: list[dict[str, Any]] = []
+        for row in response.get("output2") or []:
+            time_str = (row.get("stck_cntg_hour") or "").zfill(6)
+            close = row.get("stck_prpr")
+            if len(time_str) != 6 or not close:
+                continue
+            try:
+                close_value = float(close)
+            except (TypeError, ValueError):
+                continue
+            try:
+                volume = int(float(row.get("cntg_vol") or 0))
+            except (TypeError, ValueError):
+                volume = 0
+            rows.append(
+                {
+                    "time": time_str,
+                    "close": close_value,
+                    "volume": volume,
+                }
+            )
+        rows.sort(key=lambda item: item["time"])
+        return rows
+
+    def get_domestic_volume_ranking(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": "0000",
+            "FID_DIV_CLS_CODE": "0",
+            "FID_BLNG_CLS_CODE": "0",
+            "FID_TRGT_CLS_CODE": "111111111",
+            "FID_TRGT_EXLS_CLS_CODE": "000000",
+            "FID_INPUT_PRICE_1": "",
+            "FID_INPUT_PRICE_2": "",
+            "FID_VOL_CNT": "",
+            "FID_INPUT_DATE_1": "",
+        }
+        response = self._get(
+            "/uapi/domestic-stock/v1/quotations/volume-rank",
+            params,
+            headers=self._auth_headers("FHPST01710000"),
+        )
+        if str(response.get("rt_cd", "0")) != "0":
+            message = response.get("msg1") or response.get("msg_cd") or response
+            raise RuntimeError(f"KIS volume rank rejected: {message}")
+        rows: list[dict[str, Any]] = []
+        for row in response.get("output") or []:
+            symbol = (
+                row.get("mksc_shrn_iscd")
+                or row.get("stck_shrn_iscd")
+                or ""
+            ).strip()
+            if not symbol:
+                continue
+            try:
+                price = float(row.get("stck_prpr") or 0)
+                change_pct = float(row.get("prdy_ctrt") or 0)
+                volume = int(float(row.get("acml_vol") or 0))
+            except (TypeError, ValueError):
+                continue
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "name": (row.get("hts_kor_isnm") or "").strip(),
+                    "price": price,
+                    "change_pct": change_pct,
+                    "volume": volume,
+                }
+            )
+            if len(rows) >= limit:
+                break
+        return rows
 
     def get_domestic_balance(self) -> dict[str, Any]:
         tr_id = "VTTC8434R" if self.config.env == "paper" else "TTTC8434R"

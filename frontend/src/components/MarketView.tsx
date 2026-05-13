@@ -1,9 +1,10 @@
-import { useCallback, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import type { MarketSnapshot, Period } from '../types'
 import { fetchMarket } from '../api'
 import { dateTime, money, signed } from '../format'
 import { usePolling } from '../hooks/usePolling'
 import { useToast } from '../hooks/useToast'
+import { formatCollectedAt, getMarketStatus } from '../marketStatus'
 import PriceChart from './PriceChart'
 import SymbolList from './SymbolList'
 import SearchedList from './SearchedList'
@@ -21,6 +22,7 @@ export default function MarketView() {
   const [searchInput, setSearchInput] = useState<string>('')
   const [searchedSymbols, setSearchedSymbols] = useState<string[]>([])
   const [data, setData] = useState<MarketSnapshot | null>(null)
+  const [chartLoading, setChartLoading] = useState<boolean>(true)
 
   const rememberSymbol = useCallback((next: string) => {
     if (!next) return
@@ -35,12 +37,21 @@ export default function MarketView() {
       setData(result)
       if (result.selected_symbol) {
         rememberSymbol(result.selected_symbol)
-        if (!searchInput) setSearchInput(result.selected_symbol)
+        setSearchInput((current) => current || result.selected_symbol)
       }
     } catch (error) {
       show((error as Error).message, 'error')
+    } finally {
+      setChartLoading(false)
     }
-  }, [symbol, period, rememberSymbol, searchInput, show])
+  }, [symbol, period, rememberSymbol, show])
+
+  useEffect(() => {
+    setChartLoading(true)
+    setData((current) =>
+      current ? { ...current, chart: [], period } : current,
+    )
+  }, [period, symbol])
 
   usePolling(load, 2000)
 
@@ -55,6 +66,8 @@ export default function MarketView() {
   }
 
   const selected = data?.selected_symbol ?? ''
+  const marketStatus = getMarketStatus()
+  const collectedAt = data ? formatCollectedAt(new Date(data.collected_at)) : ''
 
   return (
     <div className="market-layout">
@@ -62,11 +75,17 @@ export default function MarketView() {
         <div className="market-head">
           <div>
             <h2>실시간 주식 가격</h2>
-            <p>
-              {data
-                ? `마지막 수집: ${dateTime.format(new Date(data.collected_at))}`
-                : '2초 단위로 가격을 수집합니다.'}
-            </p>
+            <div className="market-status">
+              <span
+                className={`market-pill ${marketStatus.isOpen ? 'open' : 'closed'}`}
+              >
+                {marketStatus.label}
+              </span>
+              <span className="market-detail">{marketStatus.detail}</span>
+              {collectedAt && (
+                <span className="market-detail">· 마지막 수집 {collectedAt}</span>
+              )}
+            </div>
           </div>
           <form className="symbol-search" onSubmit={onSubmit}>
             <input
@@ -122,7 +141,11 @@ export default function MarketView() {
           ))}
         </div>
 
-        <PriceChart points={data?.chart ?? []} period={period} />
+        <PriceChart
+          points={data?.chart ?? []}
+          period={period}
+          loading={chartLoading}
+        />
       </section>
 
       <aside className="market-sidebar">

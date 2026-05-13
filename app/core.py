@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -32,6 +32,10 @@ class TradingApp:
         self.broker = PaperBroker(load_portfolio(PORTFOLIO_PATH))
         self._account_cache: tuple[float, dict[str, Any]] | None = None
         self._price_cache: dict[str, tuple[float, int]] = {}
+        self._quote_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._daily_candle_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._minute_candle_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._volume_rank_cache: tuple[float, list[dict[str, Any]]] | None = None
 
     def refresh(self) -> None:
         self.bars = load_prices(DATA_PATH)
@@ -41,12 +45,16 @@ class TradingApp:
         return {symbol: bars[-1].close for symbol, bars in self.by_symbol.items() if bars}
 
     def market_snapshot(self, symbol: str | None = None, period: str = "day") -> dict[str, Any]:
-        selected = self.resolve_symbol(symbol or "")
+        period = period if period in {"day", "week", "month"} else "day"
+        if self.is_kis_enabled():
+            return self._kis_market_snapshot(symbol or "", period)
+        return self._local_market_snapshot(symbol or "", period)
+
+    def _local_market_snapshot(self, symbol: str, period: str) -> dict[str, Any]:
+        selected = self.resolve_symbol(symbol)
         if selected not in self.by_symbol:
             selected = next(iter(sorted(self.by_symbol)), "")
-        period = period if period in {"day", "week", "month"} else "day"
         quote = self.live_quote(selected) if selected else None
-
         return {
             "symbols": sorted(self.by_symbol),
             "selected_symbol": selected,
@@ -56,6 +64,245 @@ class TradingApp:
             "top_volume": self.top_volume(limit=5),
             "collected_at": datetime.now(),
         }
+
+    def _kis_market_snapshot(self, symbol: str, period: str) -> dict[str, Any]:
+        client = KisApiClient(KisConfig.from_env())
+        top_volume_raw = self._cached_kis_volume_ranking(client, limit=5)
+        discovery: list[str] = [row["symbol"] for row in top_volume_raw]
+        for position in self._safe_account_positions():
+            try:
+                discovery.append(self.to_kis_domestic_symbol(position.get("symbol", "")))
+            except ValueError:
+                continue
+        requested_code = ""
+        if symbol:
+            try:
+                requested_code = self.to_kis_domestic_symbol(symbol)
+                discovery.append(requested_code)
+            except ValueError:
+                requested_code = ""
+        discovery_sorted = sorted(dict.fromkeys(code for code in discovery if code))
+        selected = requested_code or (discovery_sorted[0] if discovery_sorted else "")
+        quote = self._kis_quote(client, selected) if selected else None
+        chart = self._kis_chart_points(client, selected, period) if selected else []
+
+        def render(code: str) -> str:
+            return f"{code}.KS" if code else ""
+
+        return {
+            "symbols": [render(code) for code in discovery_sorted],
+            "selected_symbol": render(selected),
+            "period": period,
+            "quote": quote,
+            "chart": chart,
+            "top_volume": [
+                {**row, "symbol": render(row["symbol"])} for row in top_volume_raw
+            ],
+            "collected_at": datetime.now(),
+        }
+
+    def _safe_account_positions(self) -> list[dict[str, Any]]:
+        try:
+            return self.account_snapshot().get("positions") or []
+        except Exception:
+            return []
+
+    def _cached_kis_volume_ranking(
+        self, client: KisApiClient, *, limit: int
+    ) -> list[dict[str, Any]]:
+        now = monotonic()
+        if self._volume_rank_cache and now - self._volume_rank_cache[0] <= 60:
+            return self._volume_rank_cache[1][:limit]
+        try:
+            rows = client.get_domestic_volume_ranking(limit=max(limit, 10))
+        except Exception:
+            rows = []
+        self._volume_rank_cache = (now, rows)
+        return rows[:limit]
+
+    def _kis_quote(self, client: KisApiClient, code: str) -> dict[str, Any] | None:
+        now = monotonic()
+        cached = self._quote_cache.get(code)
+        if cached and now - cached[0] <= 2:
+            return cached[1]
+        try:
+            output = client.get_domestic_quote(code)
+        except Exception:
+            return None
+        if not output:
+            return None
+        try:
+            price = float(output.get("stck_prpr") or 0)
+            change = float(output.get("prdy_vrss") or 0)
+            change_pct = float(output.get("prdy_ctrt") or 0)
+            volume = int(float(output.get("acml_vol") or 0))
+        except (TypeError, ValueError):
+            return None
+        sign = str(output.get("prdy_vrss_sign") or "").strip()
+        if sign in {"4", "5"}:
+            change = -abs(change)
+            change_pct = -abs(change_pct)
+        quote = {
+            "symbol": f"{code}.KS",
+            "price": price,
+            "change": change,
+            "change_pct": change_pct,
+            "volume": volume,
+            "time": datetime.now(),
+        }
+        self._quote_cache[code] = (now, quote)
+        return quote
+
+    def _kis_chart_points(
+        self, client: KisApiClient, code: str, period: str
+    ) -> list[dict[str, Any]]:
+        if period == "day":
+            return self._kis_minute_chart(client, code)
+        days = 7 if period == "week" else 28
+        candles = self._cached_kis_daily_candles(client, code)
+        if not candles:
+            return []
+        today = date.today()
+        cutoff = today - timedelta(days=days - 1)
+        filtered = [
+            row for row in candles if cutoff <= date.fromisoformat(row["date"]) <= today
+        ]
+        if period == "week":
+            return [
+                {
+                    "label": date.fromisoformat(row["date"]).strftime("%m-%d"),
+                    "tooltip_label": row["date"],
+                    "close": row["close"],
+                    "volume": row["volume"],
+                }
+                for row in filtered
+            ]
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in filtered:
+            day = date.fromisoformat(row["date"])
+            week_start = day - timedelta(days=day.weekday())
+            key = week_start.isoformat()
+            previous_volume = grouped.get(key, {}).get("volume", 0)
+            grouped[key] = {
+                "label": week_start.strftime("%m-%d"),
+                "tooltip_label": f"{key} 주",
+                "close": row["close"],
+                "volume": previous_volume + row["volume"],
+            }
+        return [grouped[key] for key in sorted(grouped)]
+
+    def _cached_kis_daily_candles(
+        self, client: KisApiClient, code: str
+    ) -> list[dict[str, Any]]:
+        now = monotonic()
+        cached = self._daily_candle_cache.get(code)
+        if cached and now - cached[0] <= 600:
+            return cached[1]
+        try:
+            rows = client.get_domestic_daily_candles(code, days_back=60)
+        except Exception:
+            rows = []
+        self._daily_candle_cache[code] = (now, rows)
+        return rows
+
+    _MARKET_OPEN_MIN = 9 * 60
+    _MARKET_CLOSE_MIN = 15 * 60 + 30
+
+    def _kis_minute_chart(
+        self, client: KisApiClient, code: str
+    ) -> list[dict[str, Any]]:
+        now = monotonic()
+        cached = self._minute_candle_cache.get(code)
+        if cached and now - cached[0] <= 60:
+            return cached[1]
+
+        raw = self._collect_kis_minute_bars(client, code)
+        buckets: dict[int, dict[str, Any]] = {}
+        for time_str, row in raw.items():
+            try:
+                hour = int(time_str[:2])
+                minute = int(time_str[2:4])
+            except (TypeError, ValueError):
+                continue
+            bucket_minute = (minute // 5) * 5
+            key = hour * 60 + bucket_minute
+            previous = buckets.get(key)
+            if previous is None or time_str > previous["_t"]:
+                buckets[key] = {
+                    "_t": time_str,
+                    "close": row["close"],
+                    "volume": (previous["volume"] if previous else 0) + row["volume"],
+                }
+            else:
+                previous["volume"] += row["volume"]
+
+        points: list[dict[str, Any]] = []
+        for key in sorted(buckets):
+            hour, minute = divmod(key, 60)
+            label = f"{hour:02d}:{minute:02d}"
+            points.append(
+                {
+                    "label": label,
+                    "tooltip_label": label,
+                    "close": buckets[key]["close"],
+                    "volume": buckets[key]["volume"],
+                    "realtime": False,
+                }
+            )
+        if points:
+            points[-1]["realtime"] = True
+        self._minute_candle_cache[code] = (now, points)
+        return points
+
+    def _collect_kis_minute_bars(
+        self, client: KisApiClient, code: str
+    ) -> dict[str, dict[str, Any]]:
+        now = datetime.now()
+        end_min = min(now.hour * 60 + now.minute, self._MARKET_CLOSE_MIN)
+        if end_min < self._MARKET_OPEN_MIN:
+            return {}
+        end_hhmmss = f"{end_min // 60:02d}{end_min % 60:02d}00"
+
+        collected: dict[str, dict[str, Any]] = {}
+        for _ in range(15):
+            try:
+                batch = client.get_domestic_minute_candles(
+                    code,
+                    end_hhmmss=end_hhmmss,
+                    include_past_day=False,
+                )
+            except Exception:
+                break
+            if not batch:
+                break
+            new_added = False
+            batch_min: list[int] = []
+            for row in batch:
+                time_str = row["time"]
+                try:
+                    bar_min = int(time_str[:2]) * 60 + int(time_str[2:4])
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    bar_min < self._MARKET_OPEN_MIN
+                    or bar_min > self._MARKET_CLOSE_MIN
+                ):
+                    continue
+                batch_min.append(bar_min)
+                if time_str in collected:
+                    continue
+                collected[time_str] = row
+                new_added = True
+            if not new_added or not batch_min:
+                break
+            earliest = min(batch_min)
+            if earliest <= self._MARKET_OPEN_MIN:
+                break
+            next_end = earliest - 1
+            if next_end < self._MARKET_OPEN_MIN:
+                break
+            end_hhmmss = f"{next_end // 60:02d}{next_end % 60:02d}00"
+        return collected
 
     def live_quote(self, symbol: str) -> dict[str, Any] | None:
         bars = self.by_symbol.get(symbol, [])
@@ -80,7 +327,7 @@ class TradingApp:
             return self._daily_points(bars, days=7)
         if period == "month":
             return self._weekly_points(bars, days=28)
-        return []
+        return self._daily_points(bars, days=14)
 
     def top_volume(self, limit: int) -> list[dict[str, Any]]:
         items = []
@@ -290,6 +537,10 @@ class TradingApp:
     def clear_kis_caches(self) -> None:
         self._account_cache = None
         self._price_cache.clear()
+        self._quote_cache.clear()
+        self._daily_candle_cache.clear()
+        self._minute_candle_cache.clear()
+        self._volume_rank_cache = None
 
     def kis_domestic_price(self, symbol: str, client: KisApiClient | None = None) -> int:
         cached = self._price_cache.get(symbol)
