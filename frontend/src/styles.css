@@ -225,13 +225,22 @@ select:disabled {
 }
 
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
+  gap: 32px;
   padding: 20px 32px;
-  background: var(--bg-base);
+  background: rgba(18, 18, 18, 0.92);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
   border-bottom: 1px solid var(--border-soft);
+}
+
+.topbar-brand {
+  min-width: 0;
 }
 
 .topbar h1 {
@@ -242,6 +251,80 @@ select:disabled {
   margin-top: 4px;
   color: var(--text-muted);
   font-size: 13px;
+}
+
+.clock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  text-align: right;
+}
+
+.clock-time {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  line-height: 1;
+}
+
+.clock-hhmm {
+  font-family: var(--font-title);
+  font-weight: 700;
+  font-size: 44px;
+  letter-spacing: -0.02em;
+  color: var(--text-bright);
+}
+
+.clock-ss {
+  font-family: var(--font-title);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+  color: var(--text-muted);
+}
+
+.clock-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.clock-date {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+}
+
+.clock-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-outline);
+  box-shadow: 0 0 0 0 rgba(30, 215, 96, 0);
+}
+
+.clock-dot.open {
+  background: var(--accent);
+  animation: clock-pulse 1.8s ease-in-out infinite;
+}
+
+.clock-dot.closed {
+  background: var(--border-outline);
+}
+
+@keyframes clock-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(30, 215, 96, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(30, 215, 96, 0);
+  }
 }
 
 main {
@@ -579,7 +662,7 @@ main {
 
 .chart-tooltip {
   position: fixed;
-  z-index: 30;
+  z-index: 100;
   display: none;
   max-width: 260px;
   padding: 8px 12px;
@@ -814,8 +897,21 @@ main {
   .topbar {
     flex-direction: column;
     align-items: flex-start;
-    gap: 8px;
+    gap: 12px;
     padding: 16px 20px;
+  }
+
+  .clock {
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .clock-hhmm {
+    font-size: 36px;
+  }
+
+  .clock-ss {
+    font-size: 16px;
   }
 
   main {

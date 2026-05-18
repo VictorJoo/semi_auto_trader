@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import Clock from './components/Clock'
 import MarketView from './components/MarketView'
 import TradingView from './components/TradingView'
 import Toast from './components/Toast'
@@ -17,10 +18,11 @@ export default function App() {
   return (
     <ToastProvider>
       <header className="topbar">
-        <div>
+        <div className="topbar-brand">
           <h1>Paper Trading Dashboard</h1>
           <p>실시간 차트와 모의 매매</p>
         </div>
+        <Clock />
       </header>
       <main>
         <nav className="tabs" aria-label="화면 탭">
