@@ -122,6 +122,16 @@ python3 -m app.telegram_diagnostics
 
 자세한 순서는 `docs_broker_api.md`를 참고하세요. 현재는 한국투자증권 REST API 클라이언트 초안을 `app/kis_api.py`에 넣어두었습니다.
 
+실투자 보유 종목만 조회하고 주문은 모의투자로 유지하려면 `.env`를 이렇게 둡니다.
+
+```env
+BROKER_PROVIDER=korea_investment
+BROKER_ENV=paper
+KIS_ACCOUNT_ENV=live
+```
+
+실계좌용 App Key/App Secret이 모의투자와 다르면 `KIS_LIVE_APP_KEY`, `KIS_LIVE_APP_SECRET`, `KIS_LIVE_ACCOUNT_NO`를 추가로 설정하세요. `BROKER_ENV=live`는 실주문이 나갈 수 있으므로 조회만 원할 때는 바꾸지 마세요.
+
 설정 점검:
 
 ```bash

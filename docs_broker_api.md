@@ -24,11 +24,14 @@
 ```env
 BROKER_PROVIDER=korea_investment
 BROKER_ENV=paper
+KIS_ACCOUNT_ENV=paper
 KIS_APP_KEY=발급받은_APP_KEY
 KIS_APP_SECRET=발급받은_APP_SECRET
 KIS_ACCOUNT_NO=계좌번호_앞8자리
 KIS_ACCOUNT_PRODUCT_CODE=01
 ```
+
+실투자 계좌 보유 종목만 조회하고 주문은 모의투자로 유지하려면 `BROKER_ENV=paper`, `KIS_ACCOUNT_ENV=live`로 둡니다. 실계좌용 키가 별도라면 `KIS_LIVE_APP_KEY`, `KIS_LIVE_APP_SECRET`, `KIS_LIVE_ACCOUNT_NO`를 사용합니다.
 
 모의투자 주문 테스트 예시:
 

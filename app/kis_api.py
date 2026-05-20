@@ -33,21 +33,30 @@ class KisConfig:
         return PAPER_BASE_URL if self.env == "paper" else LIVE_BASE_URL
 
     @classmethod
-    def from_env(cls) -> "KisConfig":
+    def from_env(cls, env: str | None = None) -> "KisConfig":
+        selected_env = (env or os.getenv("BROKER_ENV", "paper")).strip().lower()
+        prefix = "KIS_LIVE_" if selected_env == "live" else "KIS_"
+        app_key = os.getenv(f"{prefix}APP_KEY") or os.getenv("KIS_APP_KEY", "")
+        app_secret = os.getenv(f"{prefix}APP_SECRET") or os.getenv("KIS_APP_SECRET", "")
+        account_no = os.getenv(f"{prefix}ACCOUNT_NO") or os.getenv("KIS_ACCOUNT_NO", "")
+        account_product_code = (
+            os.getenv(f"{prefix}ACCOUNT_PRODUCT_CODE")
+            or os.getenv("KIS_ACCOUNT_PRODUCT_CODE", "01")
+        )
         required = {
-            "KIS_APP_KEY": os.getenv("KIS_APP_KEY", ""),
-            "KIS_APP_SECRET": os.getenv("KIS_APP_SECRET", ""),
-            "KIS_ACCOUNT_NO": os.getenv("KIS_ACCOUNT_NO", ""),
+            f"{prefix}APP_KEY": app_key,
+            f"{prefix}APP_SECRET": app_secret,
+            f"{prefix}ACCOUNT_NO": account_no,
         }
         missing = [key for key, value in required.items() if not value]
         if missing:
             raise RuntimeError(f"Missing KIS environment variables: {', '.join(missing)}")
         return cls(
-            app_key=required["KIS_APP_KEY"],
-            app_secret=required["KIS_APP_SECRET"],
-            account_no=required["KIS_ACCOUNT_NO"],
-            account_product_code=os.getenv("KIS_ACCOUNT_PRODUCT_CODE", "01"),
-            env=os.getenv("BROKER_ENV", "paper"),
+            app_key=app_key,
+            app_secret=app_secret,
+            account_no=account_no,
+            account_product_code=account_product_code,
+            env=selected_env,
         )
 
 

@@ -31,10 +31,15 @@ export default function TradingView() {
     )
   }
 
-  const isKis = data.broker_source === 'korea_investment'
+  const isKis = data.broker_source.startsWith('korea_investment')
+  const isLiveAccount = data.broker_source === 'korea_investment_live'
   const status = data.broker_error
     ? `계좌 조회 실패: ${data.broker_error}`
-    : `계좌 기준: ${isKis ? '한국투자증권 모의투자' : '로컬 모의투자'}`
+    : `계좌 기준: ${
+        isKis
+          ? `한국투자증권 ${isLiveAccount ? '실투자' : '모의투자'}`
+          : '로컬 모의투자'
+      }`
 
   return (
     <>

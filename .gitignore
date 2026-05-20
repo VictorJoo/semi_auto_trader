@@ -1,0 +1,15 @@
+.env
+.env.*
+*.env
+
+!.env.example
+!frontend/.env.example
+
+__pycache__/
+*.pyc
+data/portfolio.json
+data/kis_token_*.json
+data/notified_signals.json
+data/signals.json
+frontend/dist/
+frontend/node_modules/

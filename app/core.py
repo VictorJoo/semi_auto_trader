@@ -692,6 +692,9 @@ class TradingApp:
     def is_kis_enabled(self) -> bool:
         return self.broker_provider() == "korea_investment"
 
+    def account_env(self) -> str:
+        return os.getenv("KIS_ACCOUNT_ENV", os.getenv("BROKER_ENV", "paper")).strip().lower()
+
     def resolve_symbol(self, symbol: str) -> str:
         normalized = symbol.upper().strip()
         if normalized in self.by_symbol:
@@ -899,7 +902,7 @@ class TradingApp:
         now = monotonic()
         if self._account_cache and now - self._account_cache[0] <= 5:
             return self._account_cache[1]
-        client = KisApiClient(KisConfig.from_env())
+        client = KisApiClient(KisConfig.from_env(env=self.account_env()))
         balance = client.get_domestic_balance()
         raw_positions = balance.get("output1") or []
         summary_items = balance.get("output2") or []
@@ -941,7 +944,7 @@ class TradingApp:
             market_value = self._to_float(summary.get("scts_evlu_amt"))
 
         snapshot = {
-            "source": "korea_investment",
+            "source": f"korea_investment_{self.account_env()}",
             "cash": cash,
             "market_value": market_value,
             "total_value": total_value,
