@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -34,8 +35,13 @@ class TradingApp:
         self._price_cache: dict[str, tuple[float, int]] = {}
         self._quote_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._daily_candle_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-        self._minute_candle_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._chart_cache: dict[
+            tuple[str, str], tuple[float, list[dict[str, Any]]]
+        ] = {}
+        self._chart_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._chart_lock_registry = threading.Lock()
         self._volume_rank_cache: tuple[float, list[dict[str, Any]]] | None = None
+        self._name_cache: dict[str, str] = {}
 
     def refresh(self) -> None:
         self.bars = load_prices(DATA_PATH)
@@ -44,8 +50,10 @@ class TradingApp:
     def latest_prices(self) -> dict[str, float]:
         return {symbol: bars[-1].close for symbol, bars in self.by_symbol.items() if bars}
 
-    def market_snapshot(self, symbol: str | None = None, period: str = "day") -> dict[str, Any]:
-        period = period if period in {"day", "week", "month"} else "day"
+    _SUPPORTED_PERIODS = ("today", "1d", "1w", "3m")
+
+    def market_snapshot(self, symbol: str | None = None, period: str = "today") -> dict[str, Any]:
+        period = period if period in self._SUPPORTED_PERIODS else "today"
         if self.is_kis_enabled():
             return self._kis_market_snapshot(symbol or "", period)
         return self._local_market_snapshot(symbol or "", period)
@@ -56,7 +64,9 @@ class TradingApp:
             selected = next(iter(sorted(self.by_symbol)), "")
         quote = self.live_quote(selected) if selected else None
         return {
-            "symbols": sorted(self.by_symbol),
+            "symbols": [
+                {"code": code, "name": ""} for code in sorted(self.by_symbol)
+            ],
             "selected_symbol": selected,
             "period": period,
             "quote": quote,
@@ -67,39 +77,70 @@ class TradingApp:
 
     def _kis_market_snapshot(self, symbol: str, period: str) -> dict[str, Any]:
         client = KisApiClient(KisConfig.from_env())
-        top_volume_raw = self._cached_kis_volume_ranking(client, limit=5)
+        top_volume_raw = self._cached_kis_volume_ranking(client, limit=30)
         discovery: list[str] = [row["symbol"] for row in top_volume_raw]
-        for position in self._safe_account_positions():
-            try:
-                discovery.append(self.to_kis_domestic_symbol(position.get("symbol", "")))
-            except ValueError:
-                continue
-        requested_code = ""
-        if symbol:
-            try:
-                requested_code = self.to_kis_domestic_symbol(symbol)
-                discovery.append(requested_code)
-            except ValueError:
-                requested_code = ""
+        if self._account_cache:
+            for position in self._account_cache[1].get("positions") or []:
+                try:
+                    code = self.to_kis_domestic_symbol(position.get("symbol", ""))
+                except ValueError:
+                    continue
+                discovery.append(code)
+                position_name = (position.get("name") or "").strip()
+                if position_name and position_name != code:
+                    self._name_cache[code] = position_name
+        requested_code = self._resolve_query_to_code(symbol) if symbol else ""
+        if requested_code:
+            discovery.append(requested_code)
         discovery_sorted = sorted(dict.fromkeys(code for code in discovery if code))
         selected = requested_code or (discovery_sorted[0] if discovery_sorted else "")
         quote = self._kis_quote(client, selected) if selected else None
         chart = self._kis_chart_points(client, selected, period) if selected else []
 
-        def render(code: str) -> str:
-            return f"{code}.KS" if code else ""
-
         return {
-            "symbols": [render(code) for code in discovery_sorted],
-            "selected_symbol": render(selected),
+            "symbols": [
+                {"code": code, "name": self._name_cache.get(code, "")}
+                for code in discovery_sorted
+            ],
+            "selected_symbol": selected,
             "period": period,
             "quote": quote,
             "chart": chart,
             "top_volume": [
-                {**row, "symbol": render(row["symbol"])} for row in top_volume_raw
-            ],
+                {
+                    "symbol": row["symbol"],
+                    "name": (row.get("name") or "").strip(),
+                    "price": row.get("price", 0),
+                    "change_pct": row.get("change_pct", 0),
+                    "volume": row.get("volume", 0),
+                }
+                for row in top_volume_raw
+            ][:5],
             "collected_at": datetime.now(),
         }
+
+    def _resolve_query_to_code(self, query: str) -> str:
+        if not query:
+            return ""
+        cleaned = query.strip()
+        try:
+            return self.to_kis_domestic_symbol(cleaned)
+        except ValueError:
+            pass
+        if not self._name_cache:
+            return ""
+        needle = cleaned.lower()
+        for code, name in self._name_cache.items():
+            if not name:
+                continue
+            if name.lower() == needle:
+                return code
+        for code, name in self._name_cache.items():
+            if not name:
+                continue
+            if needle in name.lower() or name.lower() in needle:
+                return code
+        return ""
 
     def _safe_account_positions(self) -> list[dict[str, Any]]:
         try:
@@ -117,6 +158,11 @@ class TradingApp:
             rows = client.get_domestic_volume_ranking(limit=max(limit, 10))
         except Exception:
             rows = []
+        for row in rows:
+            symbol = row.get("symbol")
+            name = (row.get("name") or "").strip()
+            if symbol and name:
+                self._name_cache[symbol] = name
         self._volume_rank_cache = (now, rows)
         return rows[:limit]
 
@@ -142,8 +188,12 @@ class TradingApp:
         if sign in {"4", "5"}:
             change = -abs(change)
             change_pct = -abs(change_pct)
+        name = (output.get("hts_kor_isnm") or "").strip()
+        if name:
+            self._name_cache[code] = name
         quote = {
-            "symbol": f"{code}.KS",
+            "symbol": code,
+            "name": name or self._name_cache.get(code, ""),
             "price": price,
             "change": change,
             "change_pct": change_pct,
@@ -153,118 +203,118 @@ class TradingApp:
         self._quote_cache[code] = (now, quote)
         return quote
 
+    _MARKET_OPEN_MIN = 9 * 60
+    _MARKET_CLOSE_MIN = 15 * 60 + 30
+    _PRE_MARKET_OPEN_MIN = 8 * 60
+    _AFTER_MARKET_CLOSE_MIN = 18 * 60
+
+    @staticmethod
+    def _classify_session(min_of_day: int) -> str:
+        if min_of_day < 9 * 60:
+            return "pre"
+        if min_of_day <= 15 * 60 + 30:
+            return "regular"
+        return "after"
+
+    _CHART_TTL = {
+        "today": 60.0,
+        "1d": 60.0,
+        "1w": 300.0,
+        "3m": 1800.0,
+    }
+
     def _kis_chart_points(
         self, client: KisApiClient, code: str, period: str
     ) -> list[dict[str, Any]]:
-        if period == "day":
-            return self._kis_minute_chart(client, code)
-        days = 7 if period == "week" else 28
-        candles = self._cached_kis_daily_candles(client, code)
-        if not candles:
-            return []
-        today = date.today()
-        cutoff = today - timedelta(days=days - 1)
-        filtered = [
-            row for row in candles if cutoff <= date.fromisoformat(row["date"]) <= today
-        ]
-        if period == "week":
-            return [
-                {
-                    "label": date.fromisoformat(row["date"]).strftime("%m-%d"),
-                    "tooltip_label": row["date"],
-                    "close": row["close"],
-                    "volume": row["volume"],
-                }
-                for row in filtered
-            ]
-        grouped: dict[str, dict[str, Any]] = {}
-        for row in filtered:
-            day = date.fromisoformat(row["date"])
-            week_start = day - timedelta(days=day.weekday())
-            key = week_start.isoformat()
-            previous_volume = grouped.get(key, {}).get("volume", 0)
-            grouped[key] = {
-                "label": week_start.strftime("%m-%d"),
-                "tooltip_label": f"{key} 주",
-                "close": row["close"],
-                "volume": previous_volume + row["volume"],
-            }
-        return [grouped[key] for key in sorted(grouped)]
+        cache_key = (code, period)
+        now_ts = monotonic()
+        cached = self._chart_cache.get(cache_key)
+        ttl = self._CHART_TTL.get(period, 60.0)
+        if cached and now_ts - cached[0] <= ttl:
+            return cached[1]
+
+        lock = self._get_chart_lock(cache_key)
+        with lock:
+            cached = self._chart_cache.get(cache_key)
+            if cached and monotonic() - cached[0] <= ttl:
+                return cached[1]
+            if period == "today":
+                points = self._kis_today_chart(client, code)
+            elif period == "1d":
+                points = self._kis_1day_chart(client, code)
+            elif period == "1w":
+                points = self._kis_1week_chart(client, code)
+            elif period == "3m":
+                points = self._kis_3month_chart(client, code)
+            else:
+                points = []
+            self._chart_cache[cache_key] = (monotonic(), points)
+            return points
+
+    def _get_chart_lock(self, key: tuple[str, str]) -> threading.Lock:
+        with self._chart_lock_registry:
+            lock = self._chart_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._chart_locks[key] = lock
+            return lock
 
     def _cached_kis_daily_candles(
-        self, client: KisApiClient, code: str
+        self, client: KisApiClient, code: str, *, days_back: int = 60
     ) -> list[dict[str, Any]]:
+        cache_window = days_back
         now = monotonic()
         cached = self._daily_candle_cache.get(code)
-        if cached and now - cached[0] <= 600:
+        if cached and now - cached[0] <= 600 and len(cached[1]) >= min(cache_window, 30):
             return cached[1]
         try:
-            rows = client.get_domestic_daily_candles(code, days_back=60)
+            rows = client.get_domestic_daily_candles(code, days_back=days_back)
         except Exception:
             rows = []
         self._daily_candle_cache[code] = (now, rows)
         return rows
 
-    _MARKET_OPEN_MIN = 9 * 60
-    _MARKET_CLOSE_MIN = 15 * 60 + 30
-
-    def _kis_minute_chart(
+    def _kis_today_chart(
         self, client: KisApiClient, code: str
     ) -> list[dict[str, Any]]:
-        now = monotonic()
-        cached = self._minute_candle_cache.get(code)
-        if cached and now - cached[0] <= 60:
-            return cached[1]
+        return self._kis_intraday_chart(
+            client,
+            code,
+            from_min=self._MARKET_OPEN_MIN,
+            to_max_min=self._MARKET_CLOSE_MIN,
+            bucket_min=5,
+        )
 
-        raw = self._collect_kis_minute_bars(client, code)
-        buckets: dict[int, dict[str, Any]] = {}
-        for time_str, row in raw.items():
-            try:
-                hour = int(time_str[:2])
-                minute = int(time_str[2:4])
-            except (TypeError, ValueError):
-                continue
-            bucket_minute = (minute // 5) * 5
-            key = hour * 60 + bucket_minute
-            previous = buckets.get(key)
-            if previous is None or time_str > previous["_t"]:
-                buckets[key] = {
-                    "_t": time_str,
-                    "close": row["close"],
-                    "volume": (previous["volume"] if previous else 0) + row["volume"],
-                }
-            else:
-                previous["volume"] += row["volume"]
-
-        points: list[dict[str, Any]] = []
-        for key in sorted(buckets):
-            hour, minute = divmod(key, 60)
-            label = f"{hour:02d}:{minute:02d}"
-            points.append(
-                {
-                    "label": label,
-                    "tooltip_label": label,
-                    "close": buckets[key]["close"],
-                    "volume": buckets[key]["volume"],
-                    "realtime": False,
-                }
-            )
-        if points:
-            points[-1]["realtime"] = True
-        self._minute_candle_cache[code] = (now, points)
-        return points
-
-    def _collect_kis_minute_bars(
+    def _kis_1day_chart(
         self, client: KisApiClient, code: str
-    ) -> dict[str, dict[str, Any]]:
-        now = datetime.now()
-        end_min = min(now.hour * 60 + now.minute, self._MARKET_CLOSE_MIN)
-        if end_min < self._MARKET_OPEN_MIN:
-            return {}
-        end_hhmmss = f"{end_min // 60:02d}{end_min % 60:02d}00"
+    ) -> list[dict[str, Any]]:
+        return self._kis_intraday_chart(
+            client,
+            code,
+            from_min=self._PRE_MARKET_OPEN_MIN,
+            to_max_min=self._AFTER_MARKET_CLOSE_MIN,
+            bucket_min=5,
+        )
 
+    def _kis_intraday_chart(
+        self,
+        client: KisApiClient,
+        code: str,
+        *,
+        from_min: int,
+        to_max_min: int,
+        bucket_min: int,
+    ) -> list[dict[str, Any]]:
+        now = datetime.now()
+        today_iso = now.date().isoformat()
+        end_min = min(now.hour * 60 + now.minute, to_max_min)
+        if end_min < from_min:
+            return []
+
+        end_hhmmss = self._minute_to_hhmmss(end_min)
         collected: dict[str, dict[str, Any]] = {}
-        for _ in range(15):
+        max_calls = 2
+        for _ in range(max_calls):
             try:
                 batch = client.get_domestic_minute_candles(
                     code,
@@ -279,14 +329,13 @@ class TradingApp:
             batch_min: list[int] = []
             for row in batch:
                 time_str = row["time"]
+                if row.get("date") and row["date"] != today_iso:
+                    continue
                 try:
                     bar_min = int(time_str[:2]) * 60 + int(time_str[2:4])
                 except (TypeError, ValueError):
                     continue
-                if (
-                    bar_min < self._MARKET_OPEN_MIN
-                    or bar_min > self._MARKET_CLOSE_MIN
-                ):
+                if bar_min < from_min or bar_min > to_max_min:
                     continue
                 batch_min.append(bar_min)
                 if time_str in collected:
@@ -296,13 +345,267 @@ class TradingApp:
             if not new_added or not batch_min:
                 break
             earliest = min(batch_min)
-            if earliest <= self._MARKET_OPEN_MIN:
+            if earliest <= from_min:
                 break
             next_end = earliest - 1
-            if next_end < self._MARKET_OPEN_MIN:
+            if next_end < from_min:
                 break
-            end_hhmmss = f"{next_end // 60:02d}{next_end % 60:02d}00"
-        return collected
+            end_hhmmss = self._minute_to_hhmmss(next_end)
+
+        if from_min < self._MARKET_OPEN_MIN:
+            self._merge_overtime_bars(client, code, collected, from_min, to_max_min)
+
+        return self._aggregate_intraday_to_points(collected, bucket_min)
+
+    def _merge_overtime_bars(
+        self,
+        client: KisApiClient,
+        code: str,
+        collected: dict[str, dict[str, Any]],
+        from_min: int,
+        to_max_min: int,
+    ) -> None:
+        overtime_rows: list[dict[str, Any]] = []
+        for hour_cls_code in ("1", "2"):
+            try:
+                overtime_rows.extend(
+                    client.get_domestic_overtime_conclusions(
+                        code,
+                        hour_cls_code=hour_cls_code,
+                    )
+                )
+            except Exception:
+                continue
+        for row in overtime_rows:
+            time_str = row.get("time", "")
+            if len(time_str) != 6:
+                continue
+            try:
+                bar_min = int(time_str[:2]) * 60 + int(time_str[2:4])
+            except (TypeError, ValueError):
+                continue
+            if bar_min < from_min or bar_min > to_max_min:
+                continue
+            if bar_min >= self._MARKET_OPEN_MIN and bar_min <= self._MARKET_CLOSE_MIN:
+                continue
+            if time_str in collected:
+                continue
+            collected[time_str] = row
+
+    def _aggregate_intraday_to_points(
+        self, raw: dict[str, dict[str, Any]], bucket_min: int
+    ) -> list[dict[str, Any]]:
+        buckets: dict[int, dict[str, Any]] = {}
+        for time_str, row in raw.items():
+            try:
+                hour = int(time_str[:2])
+                minute = int(time_str[2:4])
+            except (TypeError, ValueError):
+                continue
+            bucket_floor = (minute // bucket_min) * bucket_min
+            key = hour * 60 + bucket_floor
+            previous = buckets.get(key)
+            volume = row.get("volume", 0) or 0
+            if previous is None or time_str > previous["_t"]:
+                buckets[key] = {
+                    "_t": time_str,
+                    "close": row["close"],
+                    "volume": (previous["volume"] if previous else 0) + volume,
+                }
+            else:
+                previous["volume"] += volume
+
+        points: list[dict[str, Any]] = []
+        for key in sorted(buckets):
+            hour, minute = divmod(key, 60)
+            label = f"{hour:02d}:{minute:02d}"
+            points.append(
+                {
+                    "label": label,
+                    "tooltip_label": label,
+                    "close": buckets[key]["close"],
+                    "volume": buckets[key]["volume"],
+                    "realtime": False,
+                    "session": self._classify_session(key),
+                }
+            )
+        if points:
+            points[-1]["realtime"] = True
+        return points
+
+    def _kis_1week_chart(
+        self, client: KisApiClient, code: str
+    ) -> list[dict[str, Any]]:
+        target_days = 5
+        today = date.today()
+        cutoff = today - timedelta(days=8)
+
+        end_hhmmss = self._minute_to_hhmmss(self._MARKET_CLOSE_MIN)
+        seen_keys: set[tuple[str, str]] = set()
+        collected: list[dict[str, Any]] = []
+        earliest_seen: tuple[str, str] | None = None
+
+        for call_index in range(8):
+            try:
+                batch = client.get_domestic_minute_candles(
+                    code,
+                    end_hhmmss=end_hhmmss,
+                    include_past_day=True,
+                )
+            except Exception:
+                break
+            if not batch:
+                break
+
+            new_added = False
+            for row in batch:
+                row_date = row.get("date") or today.isoformat()
+                row_time = row["time"]
+                try:
+                    bar_day = date.fromisoformat(row_date)
+                except ValueError:
+                    continue
+                if bar_day < cutoff:
+                    continue
+                try:
+                    bar_min = int(row_time[:2]) * 60 + int(row_time[2:4])
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    bar_min < self._MARKET_OPEN_MIN
+                    or bar_min > self._MARKET_CLOSE_MIN
+                ):
+                    continue
+                key = (row_date, row_time)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                collected.append({**row, "date": row_date})
+                new_added = True
+
+            if not new_added:
+                break
+
+            batch_sorted = sorted(
+                batch,
+                key=lambda r: ((r.get("date") or ""), r.get("time") or ""),
+            )
+            first = batch_sorted[0]
+            first_key = (first.get("date") or "", first.get("time") or "")
+            if earliest_seen is not None and first_key >= earliest_seen:
+                break
+            earliest_seen = first_key
+
+            unique_days = sorted({key[0] for key in seen_keys})
+            if len(unique_days) >= target_days + 1:
+                break
+
+            first_date = first.get("date") or today.isoformat()
+            first_time = first.get("time") or end_hhmmss
+            try:
+                first_day = date.fromisoformat(first_date)
+            except ValueError:
+                break
+            first_min = int(first_time[:2]) * 60 + int(first_time[2:4])
+            if first_min - 1 >= self._MARKET_OPEN_MIN:
+                next_end = first_min - 1
+                end_hhmmss = self._minute_to_hhmmss(next_end)
+            else:
+                prev_day = first_day - timedelta(days=1)
+                while prev_day.weekday() >= 5:
+                    prev_day -= timedelta(days=1)
+                if prev_day < cutoff:
+                    break
+                end_hhmmss = self._minute_to_hhmmss(self._MARKET_CLOSE_MIN)
+
+        return self._aggregate_week_to_points(collected, bucket_min=10, days_window=target_days)
+
+    def _aggregate_week_to_points(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        bucket_min: int,
+        days_window: int,
+    ) -> list[dict[str, Any]]:
+        unique_days = sorted({row["date"] for row in rows if row.get("date")})
+        if not unique_days:
+            return []
+        keep_days = set(unique_days[-days_window:])
+
+        buckets: dict[tuple[str, int], dict[str, Any]] = {}
+        for row in rows:
+            row_date = row.get("date")
+            if not row_date or row_date not in keep_days:
+                continue
+            time_str = row["time"]
+            try:
+                hour = int(time_str[:2])
+                minute = int(time_str[2:4])
+            except (TypeError, ValueError):
+                continue
+            bucket_floor = (minute // bucket_min) * bucket_min
+            key = (row_date, hour * 60 + bucket_floor)
+            previous = buckets.get(key)
+            volume = row.get("volume", 0) or 0
+            if previous is None or time_str > previous["_t"]:
+                buckets[key] = {
+                    "_t": time_str,
+                    "close": row["close"],
+                    "volume": (previous["volume"] if previous else 0) + volume,
+                }
+            else:
+                previous["volume"] += volume
+
+        points: list[dict[str, Any]] = []
+        for key in sorted(buckets):
+            row_date, minute_key = key
+            hour, minute = divmod(minute_key, 60)
+            month_day = row_date[5:].replace("-", "-")
+            label = f"{month_day} {hour:02d}:{minute:02d}"
+            points.append(
+                {
+                    "label": label,
+                    "tooltip_label": f"{row_date} {hour:02d}:{minute:02d}",
+                    "close": buckets[key]["close"],
+                    "volume": buckets[key]["volume"],
+                    "realtime": False,
+                    "session": self._classify_session(minute_key),
+                }
+            )
+        if points:
+            points[-1]["realtime"] = True
+        return points
+
+    def _kis_3month_chart(
+        self, client: KisApiClient, code: str
+    ) -> list[dict[str, Any]]:
+        candles = self._cached_kis_daily_candles(client, code, days_back=100)
+        if not candles:
+            return []
+        today = date.today()
+        cutoff = today - timedelta(days=92)
+        filtered = [
+            row
+            for row in candles
+            if cutoff <= date.fromisoformat(row["date"]) <= today
+        ]
+        points = [
+            {
+                "label": date.fromisoformat(row["date"]).strftime("%m-%d"),
+                "tooltip_label": row["date"],
+                "close": row["close"],
+                "volume": row["volume"],
+            }
+            for row in filtered
+        ]
+        if points:
+            points[-1]["realtime"] = True
+        return points
+
+    @staticmethod
+    def _minute_to_hhmmss(total_min: int) -> str:
+        total_min = max(0, min(total_min, 24 * 60 - 1))
+        return f"{total_min // 60:02d}{total_min % 60:02d}00"
 
     def live_quote(self, symbol: str) -> dict[str, Any] | None:
         bars = self.by_symbol.get(symbol, [])
@@ -323,11 +626,13 @@ class TradingApp:
 
     def chart_points(self, symbol: str, period: str) -> list[dict[str, Any]]:
         bars = self.by_symbol.get(symbol, [])
-        if period == "week":
+        if period == "1w":
             return self._daily_points(bars, days=7)
-        if period == "month":
-            return self._weekly_points(bars, days=28)
-        return self._daily_points(bars, days=14)
+        if period == "3m":
+            return self._daily_points(bars, days=90)
+        if period == "1d":
+            return self._daily_points(bars, days=1)
+        return self._daily_points(bars, days=1)
 
     def top_volume(self, limit: int) -> list[dict[str, Any]]:
         items = []
@@ -409,7 +714,7 @@ class TradingApp:
         buying_power = account["cash"]
         held_qty = {position["symbol"]: position["qty"] for position in account["positions"] if position["qty"] > 0}
         generated = [
-            generate_signal(symbol, bars, buying_power)
+            generate_signal(self.display_symbol_for_signal(symbol), bars, buying_power)
             for symbol, bars in sorted(self.by_symbol.items())
             if self.is_supported_signal_symbol(symbol)
         ]
@@ -433,7 +738,17 @@ class TradingApp:
                 )
             signals.append(signal)
         allowed_symbols = {symbol for symbol in self.by_symbol if self.is_supported_signal_symbol(symbol)}
+        if self.is_kis_enabled():
+            allowed_symbols = {self.display_symbol_for_signal(symbol) for symbol in allowed_symbols}
         return merge_active_signals(signals, allowed_symbols=allowed_symbols)
+
+    def display_symbol_for_signal(self, symbol: str) -> str:
+        if not self.is_kis_enabled():
+            return symbol
+        try:
+            return self.to_kis_domestic_symbol(symbol)
+        except ValueError:
+            return symbol
 
     def execute_signal(self, signal_id: str, qty: int | None = None) -> dict[str, Any]:
         signal = next((item for item in self.signals() if item.id == signal_id), None)
@@ -539,7 +854,7 @@ class TradingApp:
         self._price_cache.clear()
         self._quote_cache.clear()
         self._daily_candle_cache.clear()
-        self._minute_candle_cache.clear()
+        self._chart_cache.clear()
         self._volume_rank_cache = None
 
     def kis_domestic_price(self, symbol: str, client: KisApiClient | None = None) -> int:
@@ -597,15 +912,17 @@ class TradingApp:
             if qty <= 0:
                 continue
             symbol = str(item.get("pdno") or "").strip()
-            display_symbol = f"{symbol}.KS" if re.fullmatch(r"\d{6}", symbol) else symbol
             avg_price = self._to_float(item.get("pchs_avg_pric"))
             current_price = self._to_float(item.get("prpr"))
             value = self._to_float(item.get("evlu_amt")) or qty * current_price
             market_value += value
+            position_name = (item.get("prdt_name") or "").strip()
+            if symbol and position_name:
+                self._name_cache[symbol] = position_name
             positions.append(
                 {
-                    "symbol": display_symbol,
-                    "name": item.get("prdt_name") or display_symbol,
+                    "symbol": symbol,
+                    "name": position_name or symbol,
                     "qty": qty,
                     "avg_price": avg_price,
                     "current_price": current_price,

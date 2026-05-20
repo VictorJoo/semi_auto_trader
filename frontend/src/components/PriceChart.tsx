@@ -18,22 +18,104 @@ interface Props {
 const TOOLTIP_OFFSET = 14
 const TOOLTIP_VIEWPORT_MARGIN = 8
 
+function shouldShowXLabel(
+  label: string,
+  period: Period,
+  index: number,
+  total: number,
+): boolean {
+  if (!label) return false
+  if (period === 'today' || period === '1d') {
+    return /^[0-9]{2}:00$/.test(label)
+  }
+  if (period === '1w') {
+    return / 09:00$/.test(label) || index === total - 1
+  }
+  if (period === '3m') {
+    if (index === 0 || index === total - 1) return true
+    const match = label.match(/^([0-9]{2})-([0-9]{2})$/)
+    if (!match) return false
+    return match[2] === '01'
+  }
+  return true
+}
+
+function displayXLabel(label: string, period: Period): string {
+  if (period === '1w') {
+    const match = label.match(/^([0-9]{2}-[0-9]{2})\s/)
+    return match ? match[1] : label
+  }
+  return label
+}
+
+interface SessionSegment {
+  session: 'pre' | 'regular' | 'after'
+  pointsAttr: string
+}
+
+const SESSION_LABELS: Record<'pre' | 'regular' | 'after', string> = {
+  pre: '프리마켓',
+  regular: '정규장',
+  after: '시간외',
+}
+
+function sessionLabel(session: 'pre' | 'regular' | 'after' | undefined): string {
+  if (!session || session === 'regular') return ''
+  return SESSION_LABELS[session] ?? ''
+}
+
+interface PlacedSeed {
+  x: number
+  y: number
+  session?: 'pre' | 'regular' | 'after'
+}
+
+function buildSessionSegments(coords: PlacedSeed[]): SessionSegment[] {
+  if (coords.length === 0) return []
+  const segments: SessionSegment[] = []
+  let currentSession: 'pre' | 'regular' | 'after' = coords[0].session ?? 'regular'
+  let currentPoints: PlacedSeed[] = [coords[0]]
+  for (let i = 1; i < coords.length; i++) {
+    const point = coords[i]
+    const session = point.session ?? 'regular'
+    if (session !== currentSession) {
+      currentPoints.push(point)
+      segments.push({
+        session: currentSession,
+        pointsAttr: currentPoints.map((p) => `${p.x},${p.y}`).join(' '),
+      })
+      currentSession = session
+      currentPoints = [point]
+    } else {
+      currentPoints.push(point)
+    }
+  }
+  segments.push({
+    session: currentSession,
+    pointsAttr: currentPoints.map((p) => `${p.x},${p.y}`).join(' '),
+  })
+  return segments
+}
+
 const periodNames: Record<Period, string> = {
-  day: '일 차트',
-  week: '주 차트',
-  month: '월 차트',
+  today: '오늘 차트',
+  '1d': '1일 차트',
+  '1w': '1주 차트',
+  '3m': '3개월 차트',
 }
 
 const unitNames: Record<Period, string> = {
-  day: '5분 단위 시간',
-  week: '일 단위 날짜',
-  month: '주 단위 시작일',
+  today: '5분 단위',
+  '1d': '5분 단위',
+  '1w': '10분 단위',
+  '3m': '1일 단위',
 }
 
 const rangeLabels: Record<Period, string> = {
-  day: '09:00-15:30',
-  week: '오늘 기준 1주',
-  month: '오늘 기준 4주',
+  today: '09:00-15:30',
+  '1d': '09:00-현재 (시간외 포함)',
+  '1w': '최근 거래일 10분 단위',
+  '3m': '최근 90일',
 }
 
 interface Tooltip {
@@ -85,7 +167,7 @@ export default function PriceChart({ points, period, loading = false }: Props) {
       { length: 5 },
       (_, index) => min + (range / 4) * index,
     ).reverse()
-    const polyline = coords.map((point) => `${point.x},${point.y}`).join(' ')
+    const segments = buildSessionSegments(coords)
     const hitWidth = Math.max(8, step || chartWidth)
     return {
       width,
@@ -98,7 +180,7 @@ export default function PriceChart({ points, period, loading = false }: Props) {
       chartHeight,
       coords,
       yTicks,
-      polyline,
+      segments,
       hitWidth,
     }
   }, [points, period])
@@ -161,14 +243,18 @@ export default function PriceChart({ points, period, loading = false }: Props) {
     chartHeight,
     coords,
     yTicks,
-    polyline,
+    segments,
     hitWidth,
   } = layout
 
   function showTooltip(point: PlacedPoint) {
     return (event: MouseEvent) => {
+      const sessionTag = sessionLabel(point.session)
+      const head = sessionTag
+        ? `${point.tooltip_label || point.label} · ${sessionTag}`
+        : `${point.tooltip_label || point.label}`
       setTooltip({
-        text: `${point.tooltip_label || point.label} | 가격 ${money.format(point.close)}원`,
+        text: `${head} | 가격 ${money.format(point.close)}원`,
         x: event.clientX,
         y: event.clientY,
       })
@@ -181,6 +267,14 @@ export default function PriceChart({ points, period, loading = false }: Props) {
   }
 
   const last = coords[coords.length - 1]
+  const sessionLegendItems = Array.from(
+    new Set(
+      segments.map((segment) => segment.session),
+    ),
+  ).sort((a, b) => {
+    const order = { pre: 0, regular: 1, after: 2 }
+    return order[a] - order[b]
+  })
 
   return (
     <div className="chart" ref={containerRef} onMouseLeave={hideTooltip}>
@@ -193,6 +287,16 @@ export default function PriceChart({ points, period, loading = false }: Props) {
         <span>평균가: {money.format(average)}</span>
         <span>최근가: {money.format(last.close)}</span>
       </div>
+      {sessionLegendItems.length > 1 && (
+        <div className="chart-legend">
+          {sessionLegendItems.map((session) => (
+            <span key={session} className={`chart-legend-item legend-${session}`}>
+              <span className={`legend-swatch legend-swatch-${session}`} aria-hidden />
+              {SESSION_LABELS[session]}
+            </span>
+          ))}
+        </div>
+      )}
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="가격 차트">
         <text
           x={width / 2}
@@ -235,9 +339,9 @@ export default function PriceChart({ points, period, loading = false }: Props) {
           )
         })}
         {coords.map((point, index) => {
-          const isHourTick =
-            period !== 'day' || /:00$/.test(point.label)
-          if (!isHourTick) return null
+          if (!shouldShowXLabel(point.label, period, index, coords.length)) {
+            return null
+          }
           return (
             <g key={`xtick-${index}`}>
               <line
@@ -253,7 +357,7 @@ export default function PriceChart({ points, period, loading = false }: Props) {
                 textAnchor="middle"
                 className="axis-label"
               >
-                {point.label}
+                {displayXLabel(point.label, period)}
               </text>
             </g>
           )
@@ -272,7 +376,13 @@ export default function PriceChart({ points, period, loading = false }: Props) {
           y2={height - padding.bottom}
           className="axis"
         />
-        <polyline points={polyline} className="price-line" />
+        {segments.map((seg, index) => (
+          <polyline
+            key={`seg-${index}`}
+            points={seg.pointsAttr}
+            className={`price-line price-line-${seg.session}`}
+          />
+        ))}
         {coords.map((point, index) => (
           <rect
             key={`hit-${index}`}
@@ -290,7 +400,7 @@ export default function PriceChart({ points, period, loading = false }: Props) {
             cx={point.x}
             cy={point.y}
             r={point.realtime ? 5 : 3}
-            className={point.realtime ? 'live-point' : 'point'}
+            className={`${point.realtime ? 'live-point' : 'point'} session-${point.session ?? 'regular'}`}
             onMouseMove={showTooltip(point)}
           />
         ))}

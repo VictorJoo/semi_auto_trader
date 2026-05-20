@@ -2,6 +2,7 @@ export type Action = 'BUY' | 'SELL'
 
 export interface Quote {
   symbol: string
+  name?: string
   price: number
   change: number
   change_pct: number
@@ -9,25 +10,34 @@ export interface Quote {
   time: string
 }
 
+export type ChartSession = 'pre' | 'regular' | 'after'
+
 export interface ChartPoint {
   label: string
   tooltip_label?: string
   close: number
   volume: number
   realtime?: boolean
+  session?: ChartSession
 }
 
 export interface VolumeRow {
   symbol: string
+  name?: string
   price: number
   change_pct: number
   volume: number
 }
 
+export interface SymbolEntry {
+  code: string
+  name: string
+}
+
 export interface MarketSnapshot {
-  symbols: string[]
+  symbols: SymbolEntry[]
   selected_symbol: string
-  period: 'day' | 'week' | 'month'
+  period: 'today' | '1d' | '1w' | '3m'
   quote: Quote | null
   chart: ChartPoint[]
   top_volume: VolumeRow[]

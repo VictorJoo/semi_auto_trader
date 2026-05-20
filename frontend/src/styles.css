@@ -504,11 +504,73 @@ main {
 }
 
 .symbol-search {
+  position: relative;
+  display: flex;
+  gap: 8px;
   min-width: min(460px, 100%);
+}
+
+.search-box {
+  position: relative;
+  flex: 1;
+  min-width: 0;
 }
 
 .symbol-search input {
   width: 100%;
+}
+
+.search-results {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  max-height: 238px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.search-result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-base);
+  text-align: left;
+}
+
+.search-result:hover,
+.search-result:focus-visible {
+  background: var(--bg-elevated);
+}
+
+.search-result strong {
+  overflow: hidden;
+  color: var(--text-base);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-result span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.search-result.empty {
+  display: block;
+  color: var(--text-muted);
+  cursor: default;
 }
 
 .quote {
@@ -568,6 +630,63 @@ main {
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.4px;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 6px 16px 0;
+}
+
+.chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.legend-swatch-regular {
+  background: var(--accent);
+}
+
+.legend-swatch-after {
+  background: var(--warn);
+  background-image: linear-gradient(
+    to right,
+    var(--warn) 0,
+    var(--warn) 5px,
+    transparent 5px,
+    transparent 9px,
+    var(--warn) 9px
+  );
+}
+
+.legend-swatch-pre {
+  background: var(--info);
+  background-image: linear-gradient(
+    to right,
+    var(--info) 0,
+    var(--info) 2px,
+    transparent 2px,
+    transparent 5px,
+    var(--info) 5px,
+    var(--info) 7px,
+    transparent 7px,
+    transparent 10px,
+    var(--info) 10px
+  );
 }
 
 .chart svg {
@@ -639,8 +758,23 @@ main {
 
 .price-line {
   fill: none;
-  stroke: var(--accent);
   stroke-width: 2.5;
+}
+
+.price-line-regular {
+  stroke: var(--accent);
+}
+
+.price-line-after {
+  stroke: var(--warn);
+  stroke-dasharray: 5 4;
+  opacity: 0.92;
+}
+
+.price-line-pre {
+  stroke: var(--info);
+  stroke-dasharray: 2 3;
+  opacity: 0.92;
 }
 
 .hover-zone {
@@ -654,10 +788,26 @@ main {
   stroke-width: 2;
 }
 
+.point.session-after {
+  stroke: var(--warn);
+}
+
+.point.session-pre {
+  stroke: var(--info);
+}
+
 .live-point {
   fill: var(--accent);
   stroke: var(--bg-base);
   stroke-width: 2;
+}
+
+.live-point.session-after {
+  fill: var(--warn);
+}
+
+.live-point.session-pre {
+  fill: var(--info);
 }
 
 .chart-tooltip {

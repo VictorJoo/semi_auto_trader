@@ -225,8 +225,59 @@ class KisApiClient:
                 volume = int(float(row.get("cntg_vol") or 0))
             except (TypeError, ValueError):
                 volume = 0
+            date_raw = (row.get("stck_bsop_date") or "").strip()
+            date_iso = (
+                f"{date_raw[:4]}-{date_raw[4:6]}-{date_raw[6:8]}"
+                if len(date_raw) == 8
+                else ""
+            )
             rows.append(
                 {
+                    "date": date_iso,
+                    "time": time_str,
+                    "close": close_value,
+                    "volume": volume,
+                }
+            )
+        rows.sort(key=lambda item: (item.get("date") or "", item["time"]))
+        return rows
+
+    def get_domestic_overtime_conclusions(
+        self,
+        symbol: str,
+        *,
+        hour_cls_code: str = "1",
+    ) -> list[dict[str, Any]]:
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+            "FID_HOUR_CLS_CODE": hour_cls_code,
+        }
+        response = self._get(
+            "/uapi/domestic-stock/v1/quotations/inquire-time-overtimeconclusion",
+            params,
+            headers=self._auth_headers("FHPST02310000"),
+        )
+        if str(response.get("rt_cd", "0")) != "0":
+            message = response.get("msg1") or response.get("msg_cd") or response
+            raise RuntimeError(f"KIS overtime conclusions rejected: {message}")
+        rows: list[dict[str, Any]] = []
+        for row in response.get("output2") or []:
+            time_str = (row.get("stck_cntg_hour") or "").zfill(6)
+            close = row.get("stck_prpr")
+            if len(time_str) != 6 or not close:
+                continue
+            try:
+                close_value = float(close)
+            except (TypeError, ValueError):
+                continue
+            try:
+                volume = int(float(row.get("cntg_vol") or 0))
+            except (TypeError, ValueError):
+                volume = 0
+            rows.append(
+                {
+                    "date": datetime.now().date().isoformat(),
                     "time": time_str,
                     "close": close_value,
                     "volume": volume,
