@@ -16,6 +16,7 @@ from .env import load_dotenv
 from .kis_api import KisApiClient, KisConfig
 from .models import Signal
 from .signal_store import merge_active_signals
+from .stock_master import StockMasterEntry, load_stock_master
 from .store import load_portfolio, save_portfolio
 from .strategy import generate_signal
 
@@ -41,6 +42,8 @@ class TradingApp:
         self._chart_locks: dict[tuple[str, str], threading.Lock] = {}
         self._chart_lock_registry = threading.Lock()
         self._volume_rank_cache: tuple[float, list[dict[str, Any]]] | None = None
+        self._stock_master_cache: tuple[float, list[StockMasterEntry]] | None = None
+        self._order_history_cache: tuple[float, list[dict[str, Any]]] | None = None
         self._name_cache: dict[str, str] = {}
 
     def refresh(self) -> None:
@@ -50,13 +53,65 @@ class TradingApp:
     def latest_prices(self) -> dict[str, float]:
         return {symbol: bars[-1].close for symbol, bars in self.by_symbol.items() if bars}
 
-    _SUPPORTED_PERIODS = ("today", "1d", "1w", "3m")
+    _SUPPORTED_PERIODS = ("today", "1w", "3m")
 
     def market_snapshot(self, symbol: str | None = None, period: str = "today") -> dict[str, Any]:
         period = period if period in self._SUPPORTED_PERIODS else "today"
         if self.is_kis_enabled():
             return self._kis_market_snapshot(symbol or "", period)
         return self._local_market_snapshot(symbol or "", period)
+
+    def symbol_master_snapshot(self) -> dict[str, Any]:
+        if self.is_kis_enabled():
+            symbols = self._stock_master_symbols()
+        else:
+            symbols = [
+                {"code": code, "name": "", "market": ""}
+                for code in sorted(self.by_symbol)
+            ]
+        return {
+            "symbols": symbols,
+            "count": len(symbols),
+            "collected_at": datetime.now(),
+        }
+
+    def orderbook_snapshot(self, symbol: str) -> dict[str, Any]:
+        if not self.is_kis_enabled():
+            raise ValueError("호가 조회는 한국투자증권 연결 모드에서만 지원합니다.")
+        code = self._resolve_query_to_code(symbol) or self.to_kis_domestic_symbol(symbol)
+        client = KisApiClient(KisConfig.from_env())
+        raw = client.get_domestic_orderbook(code)
+        output1 = raw.get("output1") or {}
+        output2 = raw.get("output2") or {}
+        asks: list[dict[str, Any]] = []
+        bids: list[dict[str, Any]] = []
+        for level in range(1, 11):
+            ask_price = self._to_float(output1.get(f"askp{level}"))
+            bid_price = self._to_float(output1.get(f"bidp{level}"))
+            ask_qty = self._to_int(
+                output1.get(f"askp_rsqn{level}")
+                or output1.get(f"askp_rsqn_icdc{level}")
+            )
+            bid_qty = self._to_int(
+                output1.get(f"bidp_rsqn{level}")
+                or output1.get(f"bidp_rsqn_icdc{level}")
+            )
+            if ask_price > 0:
+                asks.append({"level": level, "price": ask_price, "qty": ask_qty})
+            if bid_price > 0:
+                bids.append({"level": level, "price": bid_price, "qty": bid_qty})
+
+        return {
+            "symbol": code,
+            "name": self._name_cache.get(code, ""),
+            "asks": asks,
+            "bids": bids,
+            "expected_price": self._to_float(output2.get("antc_cnpr")),
+            "expected_qty": self._to_int(output2.get("antc_vol")),
+            "total_ask_qty": self._to_int(output1.get("total_askp_rsqn")),
+            "total_bid_qty": self._to_int(output1.get("total_bidp_rsqn")),
+            "collected_at": datetime.now(),
+        }
 
     def _local_market_snapshot(self, symbol: str, period: str) -> dict[str, Any]:
         selected = self.resolve_symbol(symbol)
@@ -77,8 +132,10 @@ class TradingApp:
 
     def _kis_market_snapshot(self, symbol: str, period: str) -> dict[str, Any]:
         client = KisApiClient(KisConfig.from_env())
-        top_volume_raw = self._cached_kis_volume_ranking(client, limit=30)
-        discovery: list[str] = [row["symbol"] for row in top_volume_raw]
+        master_symbols = self._stock_master_symbols()
+        top_volume_raw = self._cached_kis_volume_ranking(client, limit=100)
+        discovery: list[str] = [entry["code"] for entry in master_symbols]
+        discovery.extend(row["symbol"] for row in top_volume_raw)
         if self._account_cache:
             for position in self._account_cache[1].get("positions") or []:
                 try:
@@ -93,15 +150,14 @@ class TradingApp:
         if requested_code:
             discovery.append(requested_code)
         discovery_sorted = sorted(dict.fromkeys(code for code in discovery if code))
-        selected = requested_code or (discovery_sorted[0] if discovery_sorted else "")
+        selected = requested_code or (top_volume_raw[0]["symbol"] if top_volume_raw else "")
+        if not selected:
+            selected = discovery_sorted[0] if discovery_sorted else ""
         quote = self._kis_quote(client, selected) if selected else None
         chart = self._kis_chart_points(client, selected, period) if selected else []
 
         return {
-            "symbols": [
-                {"code": code, "name": self._name_cache.get(code, "")}
-                for code in discovery_sorted
-            ],
+            "symbols": self._symbols_for_response(discovery_sorted, master_symbols),
             "selected_symbol": selected,
             "period": period,
             "quote": quote,
@@ -113,11 +169,48 @@ class TradingApp:
                     "price": row.get("price", 0),
                     "change_pct": row.get("change_pct", 0),
                     "volume": row.get("volume", 0),
+                    "trading_value": float(row.get("price", 0) or 0)
+                    * float(row.get("volume", 0) or 0),
                 }
                 for row in top_volume_raw
-            ][:5],
+            ][:30],
             "collected_at": datetime.now(),
         }
+
+    def _stock_master_symbols(self) -> list[dict[str, str]]:
+        now = monotonic()
+        if self._stock_master_cache and now - self._stock_master_cache[0] <= 3600:
+            entries = self._stock_master_cache[1]
+        else:
+            try:
+                entries = load_stock_master()
+            except Exception:
+                entries = []
+            self._stock_master_cache = (now, entries)
+
+        symbols: list[dict[str, str]] = []
+        for entry in entries:
+            self._name_cache[entry.code] = entry.name
+            symbols.append(
+                {"code": entry.code, "name": entry.name, "market": entry.market}
+            )
+        return symbols
+
+    def _symbols_for_response(
+        self, codes: list[str], master_symbols: list[dict[str, str]]
+    ) -> list[dict[str, str]]:
+        master_by_code = {entry["code"]: entry for entry in master_symbols}
+        rows: list[dict[str, str]] = []
+        for code in codes:
+            master = master_by_code.get(code)
+            rows.append(
+                {
+                    "code": code,
+                    "name": (master or {}).get("name") or self._name_cache.get(code, ""),
+                    "market": (master or {}).get("market", ""),
+                }
+            )
+        return sorted(rows, key=lambda item: ((item.get("name") or item["code"]), item["code"]))
 
     def _resolve_query_to_code(self, query: str) -> str:
         if not query:
@@ -152,10 +245,10 @@ class TradingApp:
         self, client: KisApiClient, *, limit: int
     ) -> list[dict[str, Any]]:
         now = monotonic()
-        if self._volume_rank_cache and now - self._volume_rank_cache[0] <= 60:
+        if self._volume_rank_cache and now - self._volume_rank_cache[0] <= 10:
             return self._volume_rank_cache[1][:limit]
         try:
-            rows = client.get_domestic_volume_ranking(limit=max(limit, 10))
+            rows = client.get_domestic_volume_ranking(limit=max(limit, 100))
         except Exception:
             rows = []
         for row in rows:
@@ -217,8 +310,7 @@ class TradingApp:
         return "after"
 
     _CHART_TTL = {
-        "today": 60.0,
-        "1d": 60.0,
+        "today": 10.0,
         "1w": 300.0,
         "3m": 1800.0,
     }
@@ -240,8 +332,6 @@ class TradingApp:
                 return cached[1]
             if period == "today":
                 points = self._kis_today_chart(client, code)
-            elif period == "1d":
-                points = self._kis_1day_chart(client, code)
             elif period == "1w":
                 points = self._kis_1week_chart(client, code)
             elif period == "3m":
@@ -285,17 +375,6 @@ class TradingApp:
             bucket_min=5,
         )
 
-    def _kis_1day_chart(
-        self, client: KisApiClient, code: str
-    ) -> list[dict[str, Any]]:
-        return self._kis_intraday_chart(
-            client,
-            code,
-            from_min=self._PRE_MARKET_OPEN_MIN,
-            to_max_min=self._AFTER_MARKET_CLOSE_MIN,
-            bucket_min=5,
-        )
-
     def _kis_intraday_chart(
         self,
         client: KisApiClient,
@@ -313,7 +392,10 @@ class TradingApp:
 
         end_hhmmss = self._minute_to_hhmmss(end_min)
         collected: dict[str, dict[str, Any]] = {}
-        max_calls = 2
+        # KIS minute candles are returned in a limited window per request.
+        # Walk backward until the market open so today's chart does not only
+        # show the most recent slice of the session.
+        max_calls = max(4, ((to_max_min - from_min) // 30) + 2)
         for _ in range(max_calls):
             try:
                 batch = client.get_domestic_minute_candles(
@@ -630,8 +712,6 @@ class TradingApp:
             return self._daily_points(bars, days=7)
         if period == "3m":
             return self._daily_points(bars, days=90)
-        if period == "1d":
-            return self._daily_points(bars, days=1)
         return self._daily_points(bars, days=1)
 
     def top_volume(self, limit: int) -> list[dict[str, Any]]:
@@ -647,6 +727,7 @@ class TradingApp:
                     "price": latest.close,
                     "change_pct": ((latest.close / previous) - 1) * 100 if previous else 0.0,
                     "volume": latest.volume,
+                    "trading_value": latest.close * latest.volume,
                 }
             )
         return sorted(items, key=lambda item: item["volume"], reverse=True)[:limit]
@@ -770,39 +851,55 @@ class TradingApp:
                 raise ValueError(f"보유 수량보다 많이 매도할 수 없습니다. 보유 수량: {held_qty}")
         return self.place_order(signal.symbol, signal.action, order_qty, f"Approved signal: {signal_id}")
 
-    def place_order(self, symbol: str, action: str, qty: int, reason: str) -> dict[str, Any]:
+    def place_order(
+        self,
+        symbol: str,
+        action: str,
+        qty: int,
+        reason: str,
+        price: int | None = None,
+        order_type: str | None = None,
+    ) -> dict[str, Any]:
         symbol = self.resolve_symbol(symbol)
         action = action.upper()
-        prices = self.latest_prices()
-        if symbol not in prices:
-            raise ValueError(f"Unknown symbol: {symbol}")
-        price = prices[symbol]
-        external_order = self.place_external_order(symbol, action, qty)
+        if qty <= 0:
+            raise ValueError("Quantity must be positive.")
+        if action not in {"BUY", "SELL"}:
+            raise ValueError("Action must be BUY or SELL.")
+        external_order = self.place_external_order(symbol, action, qty, price, order_type)
         if external_order is not None:
-            qty = int(external_order.get("qty", qty))
-            price = float(external_order.get("price", price))
             return {
                 "created_at": datetime.now(),
-                "symbol": symbol,
+                "symbol": external_order.get("symbol", symbol),
                 "action": action,
-                "qty": qty,
-                "price": price,
+                "qty": int(external_order.get("qty", qty)),
+                "price": float(external_order.get("price", price or 0)),
                 "reason": reason,
                 "external_order": external_order,
             }
+
+        prices = self.latest_prices()
+        if symbol not in prices:
+            raise ValueError(f"Unknown symbol: {symbol}")
+        trade_price = float(price or prices[symbol])
         if action == "BUY":
-            trade = self.broker.buy(symbol, qty, price, reason)
+            trade = self.broker.buy(symbol, qty, trade_price, reason)
         elif action == "SELL":
-            trade = self.broker.sell(symbol, qty, price, reason)
-        else:
-            raise ValueError("Action must be BUY or SELL.")
+            trade = self.broker.sell(symbol, qty, trade_price, reason)
         save_portfolio(PORTFOLIO_PATH, self.broker.portfolio)
         payload = asdict(trade)
         if external_order is not None:
             payload["external_order"] = external_order
         return payload
 
-    def place_external_order(self, symbol: str, action: str, qty: int) -> dict[str, Any] | None:
+    def place_external_order(
+        self,
+        symbol: str,
+        action: str,
+        qty: int,
+        price: int | None = None,
+        order_type: str | None = None,
+    ) -> dict[str, Any] | None:
         provider = self.broker_provider()
         if provider in {"", "paper", "local"}:
             return None
@@ -811,27 +908,37 @@ class TradingApp:
 
         domestic_symbol = self.to_kis_domestic_symbol(symbol)
         client = KisApiClient(KisConfig.from_env())
-        market_price = self.kis_domestic_price(domestic_symbol, client)
+        order_price = int(price or 0)
+        order_type = order_type or ("00" if order_price > 0 else "01")
+        reference_price = order_price or self.kis_domestic_price(domestic_symbol, client)
         adjusted = False
         order_qty = qty
         if action.upper() == "BUY":
-            max_qty = int(self.account_snapshot()["cash"] // market_price)
+            max_qty = int(self.account_snapshot()["cash"] // reference_price)
             if max_qty <= 0:
                 raise ValueError(
                     f"KIS 현재가 기준 매수 가능 수량이 없습니다. "
-                    f"현재가 {market_price:,}원"
+                    f"주문 기준가 {reference_price:,}원"
                 )
             if order_qty > max_qty:
                 order_qty = max_qty
                 adjusted = True
-        response = client.order_domestic_stock(domestic_symbol, action, order_qty)
+        response = client.order_domestic_stock(
+            domestic_symbol,
+            action,
+            order_qty,
+            price=order_price,
+            order_type=order_type,
+        )
         self.clear_kis_caches()
         return {
             "provider": "korea_investment",
             "env": os.getenv("BROKER_ENV", "paper"),
             "symbol": domestic_symbol,
             "qty": order_qty,
-            "price": market_price,
+            "price": reference_price,
+            "order_price": order_price,
+            "order_type": order_type,
             "adjusted": adjusted,
             "response": response,
         }
@@ -891,7 +998,10 @@ class TradingApp:
             )
         return {
             "source": "local_paper",
+            "account_number": "로컬 모의계좌",
             "cash": self.broker.portfolio.cash,
+            "krw_cash": self.broker.portfolio.cash,
+            "usd_cash": 0.0,
             "market_value": market_value,
             "total_value": self.broker.portfolio.cash + market_value,
             "positions": positions,
@@ -945,10 +1055,17 @@ class TradingApp:
 
         snapshot = {
             "source": f"korea_investment_{self.account_env()}",
+            "account_number": self._format_account_number(
+                client.config.account_no,
+                client.config.account_product_code,
+            ),
             "cash": cash,
+            "krw_cash": cash,
+            "usd_cash": self._to_float(summary.get("frcr_dncl_amt")),
             "market_value": market_value,
             "total_value": total_value,
             "positions": positions,
+            "orders": self._kis_order_history(client),
             "error": None,
         }
         self._account_cache = (now, snapshot)
@@ -973,14 +1090,17 @@ class TradingApp:
         except Exception as exc:
             account = {
                 "source": self.broker_provider(),
+                "account_number": "",
                 "cash": 0.0,
+                "krw_cash": 0.0,
+                "usd_cash": 0.0,
                 "market_value": 0.0,
                 "total_value": 0.0,
                 "positions": [],
                 "error": str(exc),
             }
 
-        backtests = [
+        backtests = [] if self.is_kis_enabled() else [
             run_backtest(symbol, bars)
             for symbol, bars in sorted(self.by_symbol.items())
             if len(bars) >= 35
@@ -989,13 +1109,17 @@ class TradingApp:
         return {
             "broker_source": account["source"],
             "broker_error": account["error"],
+            "account_label": self.account_label(account["source"]),
+            "account_number": account.get("account_number", ""),
             "cash": account["cash"],
+            "krw_cash": account.get("krw_cash", account["cash"]),
+            "usd_cash": account.get("usd_cash", 0.0),
             "market_value": account["market_value"],
             "total_value": account["total_value"],
-            "prices": prices,
+            "prices": {} if self.is_kis_enabled() else prices,
             "positions": account["positions"],
             "signals": self.serialized_signals(),
-            "trades": [] if self.is_kis_enabled() else [asdict(trade) for trade in self.broker.portfolio.trades[:20]],
+            "trades": account.get("orders", []) if self.is_kis_enabled() else [asdict(trade) for trade in self.broker.portfolio.trades[:20]],
             "backtests": [
                 {
                     "symbol": result.symbol,
@@ -1007,6 +1131,72 @@ class TradingApp:
                 for result in backtests
             ],
         }
+
+    def account_label(self, source: str) -> str:
+        if source == "korea_investment_live":
+            return "한국투자증권 실전투자"
+        if source == "korea_investment_paper":
+            return "한국투자증권 모의투자"
+        return "로컬 모의투자"
+
+    @staticmethod
+    def _format_account_number(account_no: str, product_code: str) -> str:
+        account_no = account_no.strip()
+        product_code = product_code.strip()
+        if account_no and product_code:
+            return f"{account_no}-{product_code}"
+        return account_no or product_code
+
+    def _kis_order_history(self, client: KisApiClient) -> list[dict[str, Any]]:
+        now = monotonic()
+        if self._order_history_cache and now - self._order_history_cache[0] <= 15:
+            return self._order_history_cache[1]
+        today = date.today()
+        try:
+            raw = client.get_domestic_order_history(
+                start_date=today - timedelta(days=7),
+                end_date=today,
+            )
+        except Exception:
+            rows: list[dict[str, Any]] = []
+            self._order_history_cache = (now, rows)
+            return rows
+
+        rows = []
+        for item in raw.get("output1") or []:
+            symbol = str(item.get("pdno") or item.get("stck_shrn_iscd") or "").strip()
+            name = str(item.get("prdt_name") or item.get("prdt_name") or symbol).strip()
+            action_name = str(item.get("sll_buy_dvsn_cd_name") or item.get("sll_buy_dvsn_cd") or "").strip()
+            action = "SELL" if "매도" in action_name or action_name == "01" else "BUY"
+            qty = self._to_int(item.get("ord_qty") or item.get("tot_ccld_qty"))
+            filled_qty = self._to_int(item.get("tot_ccld_qty") or item.get("ccld_qty"))
+            price = self._to_float(item.get("ord_unpr") or item.get("avg_prvs") or item.get("stck_prpr"))
+            order_no = str(item.get("odno") or "").strip()
+            order_time = str(item.get("ord_tmd") or "").strip()
+            order_date = str(item.get("ord_dt") or "").strip()
+            created_at = datetime.now()
+            if len(order_date) == 8:
+                time_part = order_time.zfill(6) if order_time else "000000"
+                try:
+                    created_at = datetime.strptime(order_date + time_part, "%Y%m%d%H%M%S")
+                except ValueError:
+                    created_at = datetime.now()
+            rows.append(
+                {
+                    "created_at": created_at,
+                    "symbol": symbol,
+                    "name": name,
+                    "action": action,
+                    "qty": qty,
+                    "filled_qty": filled_qty,
+                    "price": price,
+                    "reason": "한국투자증권 주문내역",
+                    "order_no": order_no,
+                    "status": "완료" if filled_qty >= qty and qty > 0 else "대기",
+                }
+            )
+        self._order_history_cache = (now, rows[:20])
+        return rows[:20]
 
     def serialized_signals(self) -> list[dict[str, Any]]:
         try:

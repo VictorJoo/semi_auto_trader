@@ -32,18 +32,21 @@ export default function TradingView() {
   }
 
   const isKis = data.broker_source.startsWith('korea_investment')
-  const isLiveAccount = data.broker_source === 'korea_investment_live'
   const status = data.broker_error
     ? `계좌 조회 실패: ${data.broker_error}`
-    : `계좌 기준: ${
-        isKis
-          ? `한국투자증권 ${isLiveAccount ? '실투자' : '모의투자'}`
-          : '로컬 모의투자'
-      }`
+    : `계좌 기준: ${data.account_label}`
 
   return (
     <>
       <header className="metrics-header">
+        <div className="account-summary">
+          <span>현재 계좌</span>
+          <strong>{data.account_label}</strong>
+          <span>
+            보유 현금 {money.format(data.cash)} · 총 평가금액{' '}
+            {money.format(data.total_value)}
+          </span>
+        </div>
         <button
           type="button"
           className="secondary"
@@ -107,7 +110,9 @@ export default function TradingView() {
         <div className="panel">
           <h2>백테스트</h2>
           <div className="list compact">
-            {data.backtests.length === 0 ? (
+            {isKis ? (
+              <EmptyItem text="실계좌 모드에서는 로컬 백테스트를 표시하지 않습니다." />
+            ) : data.backtests.length === 0 ? (
               <EmptyItem text="백테스트 결과가 없습니다." />
             ) : (
               data.backtests.map((result) => (
@@ -147,7 +152,7 @@ export default function TradingView() {
       </section>
 
       <section className="panel">
-        <h2>수동 모의 주문</h2>
+        <h2>수동 주문</h2>
         <ManualOrderForm onPlaced={load} />
       </section>
     </>

@@ -20,7 +20,7 @@ export default function ManualOrderForm({ onPlaced }: Props) {
     setPending(true)
     try {
       await placeOrder(symbol.trim().toUpperCase(), action, qty)
-      const message = '수동 모의 주문이 처리되었습니다.'
+      const message = '수동 주문이 처리되었습니다.'
       setNotice(message)
       show(message, 'success')
       onPlaced()
@@ -45,7 +45,7 @@ export default function ManualOrderForm({ onPlaced }: Props) {
         </select>
         <input
           name="symbol"
-          placeholder="AAPL"
+          placeholder="005930"
           required
           value={symbol}
           onChange={(event) => setSymbol(event.target.value)}

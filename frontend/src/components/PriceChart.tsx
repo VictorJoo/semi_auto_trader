@@ -25,7 +25,7 @@ function shouldShowXLabel(
   total: number,
 ): boolean {
   if (!label) return false
-  if (period === 'today' || period === '1d') {
+  if (period === 'today') {
     return /^[0-9]{2}:00$/.test(label)
   }
   if (period === '1w') {
@@ -99,21 +99,18 @@ function buildSessionSegments(coords: PlacedSeed[]): SessionSegment[] {
 
 const periodNames: Record<Period, string> = {
   today: '오늘 차트',
-  '1d': '1일 차트',
   '1w': '1주 차트',
   '3m': '3개월 차트',
 }
 
 const unitNames: Record<Period, string> = {
   today: '5분 단위',
-  '1d': '5분 단위',
   '1w': '10분 단위',
   '3m': '1일 단위',
 }
 
 const rangeLabels: Record<Period, string> = {
   today: '09:00-15:30',
-  '1d': '09:00-현재 (시간외 포함)',
   '1w': '최근 거래일 10분 단위',
   '3m': '최근 90일',
 }
@@ -127,6 +124,37 @@ interface Tooltip {
 interface PlacedPoint extends ChartPoint {
   x: number
   y: number
+}
+
+interface XTick {
+  label: string
+  x: number
+}
+
+const TODAY_OPEN_MIN = 9 * 60
+const TODAY_CLOSE_MIN = 15 * 60 + 30
+
+function timeLabelToMinute(label: string): number | null {
+  const match = label.match(/^([0-9]{2}):([0-9]{2})$/)
+  if (!match) return null
+  const hour = Number(match[1])
+  const minute = Number(match[2])
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null
+  return hour * 60 + minute
+}
+
+function buildTodayTicks(chartWidth: number, left: number): XTick[] {
+  const labels = ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '15:30']
+  return labels.map((label) => {
+    const minute = timeLabelToMinute(label) ?? TODAY_OPEN_MIN
+    return {
+      label,
+      x:
+        left +
+        ((minute - TODAY_OPEN_MIN) / (TODAY_CLOSE_MIN - TODAY_OPEN_MIN)) *
+          chartWidth,
+    }
+  })
 }
 
 export default function PriceChart({ points, period, loading = false }: Props) {
@@ -159,16 +187,28 @@ export default function PriceChart({ points, period, loading = false }: Props) {
     const step = points.length > 1 ? chartWidth / (points.length - 1) : 0
     const coords: PlacedPoint[] = points.map((point, index) => ({
       ...point,
-      x: padding.left + step * index,
+      x:
+        period === 'today' && timeLabelToMinute(point.label) !== null
+          ? padding.left +
+            (((timeLabelToMinute(point.label) ?? TODAY_OPEN_MIN) -
+              TODAY_OPEN_MIN) /
+              (TODAY_CLOSE_MIN - TODAY_OPEN_MIN)) *
+              chartWidth
+          : padding.left + step * index,
       y:
         padding.top + chartHeight - ((point.close - min) / range) * chartHeight,
     }))
+    const xTicks =
+      period === 'today' ? buildTodayTicks(chartWidth, padding.left) : null
     const yTicks = Array.from(
       { length: 5 },
       (_, index) => min + (range / 4) * index,
     ).reverse()
     const segments = buildSessionSegments(coords)
-    const hitWidth = Math.max(8, step || chartWidth)
+    const hitWidth =
+      period === 'today'
+        ? Math.max(8, chartWidth / ((TODAY_CLOSE_MIN - TODAY_OPEN_MIN) / 5))
+        : Math.max(8, step || chartWidth)
     return {
       width,
       height,
@@ -179,6 +219,7 @@ export default function PriceChart({ points, period, loading = false }: Props) {
       range,
       chartHeight,
       coords,
+      xTicks,
       yTicks,
       segments,
       hitWidth,
@@ -242,6 +283,7 @@ export default function PriceChart({ points, period, loading = false }: Props) {
     range,
     chartHeight,
     coords,
+    xTicks,
     yTicks,
     segments,
     hitWidth,
@@ -338,7 +380,7 @@ export default function PriceChart({ points, period, loading = false }: Props) {
             </g>
           )
         })}
-        {coords.map((point, index) => {
+        {(xTicks ?? coords).map((point, index) => {
           if (!shouldShowXLabel(point.label, period, index, coords.length)) {
             return null
           }

@@ -2,6 +2,11 @@ export const money = new Intl.NumberFormat('ko-KR', {
   maximumFractionDigits: 0,
 })
 
+export const usd = new Intl.NumberFormat('en-US', {
+  maximumFractionDigits: 2,
+  minimumFractionDigits: 2,
+})
+
 export const pct = new Intl.NumberFormat('ko-KR', {
   maximumFractionDigits: 2,
 })

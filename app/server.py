@@ -50,6 +50,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                     )
                 )
                 return
+            if parsed.path == "/api/symbols":
+                self.send_json(APP.symbol_master_snapshot())
+                return
+            if parsed.path == "/api/orderbook":
+                params = parse_qs(parsed.query)
+                self.send_json(
+                    APP.orderbook_snapshot((params.get("symbol") or [""])[0])
+                )
+                return
             if parsed.path == "/api/refresh":
                 APP.refresh()
                 notified = notify_new_signals(APP.signals())
@@ -76,11 +85,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "trade": trade})
                 return
             if parsed.path == "/api/order":
+                price = payload.get("price")
                 trade = APP.place_order(
                     payload["symbol"],
                     payload["action"],
                     int(payload["qty"]),
                     payload.get("reason", "Dashboard manual order"),
+                    int(price) if price else None,
+                    payload.get("order_type"),
                 )
                 self.send_json({"ok": True, "trade": trade})
                 return

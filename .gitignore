@@ -11,5 +11,6 @@ data/portfolio.json
 data/kis_token_*.json
 data/notified_signals.json
 data/signals.json
+data/stock_master.json
 frontend/dist/
 frontend/node_modules/

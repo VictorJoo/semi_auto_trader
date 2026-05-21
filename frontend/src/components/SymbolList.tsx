@@ -23,9 +23,7 @@ export default function SymbolList({ rows, selectedSymbol, onSelect }: Props) {
             <strong>
               {index + 1}. {row.name || row.symbol}
             </strong>
-            <span>
-              {row.name ? `${row.symbol} · ` : ''}거래량 {money.format(row.volume)}
-            </span>
+            <span>거래량 {money.format(row.volume)}</span>
           </div>
           <div>
             <strong>{money.format(row.price)}</strong>

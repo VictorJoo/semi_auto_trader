@@ -5,7 +5,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -145,6 +145,21 @@ class KisApiClient:
             message = response.get("msg1") or response.get("msg_cd") or response
             raise RuntimeError(f"KIS quote rejected: {message}")
         return response.get("output") or {}
+
+    def get_domestic_orderbook(self, symbol: str) -> dict[str, Any]:
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": symbol,
+        }
+        response = self._get(
+            "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn",
+            params,
+            headers=self._auth_headers("FHKST01010200"),
+        )
+        if str(response.get("rt_cd", "0")) != "0":
+            message = response.get("msg1") or response.get("msg_cd") or response
+            raise RuntimeError(f"KIS orderbook rejected: {message}")
+        return response
 
     def get_domestic_daily_candles(
         self,
@@ -368,6 +383,39 @@ class KisApiClient:
         if str(response.get("rt_cd", "0")) != "0":
             message = response.get("msg1") or response.get("msg_cd") or response
             raise RuntimeError(f"KIS balance rejected: {message}")
+        return response
+
+    def get_domestic_order_history(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, Any]:
+        tr_id = "VTTC8001R" if self.config.env == "paper" else "TTTC8001R"
+        params = {
+            "CANO": self.config.account_no,
+            "ACNT_PRDT_CD": self.config.account_product_code,
+            "INQR_STRT_DT": start_date.strftime("%Y%m%d"),
+            "INQR_END_DT": end_date.strftime("%Y%m%d"),
+            "SLL_BUY_DVSN_CD": "00",
+            "INQR_DVSN": "00",
+            "PDNO": "",
+            "CCLD_DVSN": "00",
+            "ORD_GNO_BRNO": "",
+            "ODNO": "",
+            "INQR_DVSN_3": "00",
+            "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        }
+        response = self._get(
+            "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+            params,
+            headers=self._auth_headers(tr_id),
+        )
+        if str(response.get("rt_cd", "0")) != "0":
+            message = response.get("msg1") or response.get("msg_cd") or response
+            raise RuntimeError(f"KIS order history rejected: {message}")
         return response
 
     def _auth_headers(self, tr_id: str) -> dict[str, str]:

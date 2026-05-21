@@ -27,20 +27,46 @@ export interface VolumeRow {
   price: number
   change_pct: number
   volume: number
+  trading_value?: number
+}
+
+export interface OrderbookLevel {
+  level: number
+  price: number
+  qty: number
+}
+
+export interface OrderbookSnapshot {
+  symbol: string
+  name?: string
+  asks: OrderbookLevel[]
+  bids: OrderbookLevel[]
+  expected_price: number
+  expected_qty: number
+  total_ask_qty: number
+  total_bid_qty: number
+  collected_at: string
 }
 
 export interface SymbolEntry {
   code: string
   name: string
+  market?: string
 }
 
 export interface MarketSnapshot {
   symbols: SymbolEntry[]
   selected_symbol: string
-  period: 'today' | '1d' | '1w' | '3m'
+  period: 'today' | '1w' | '3m'
   quote: Quote | null
   chart: ChartPoint[]
   top_volume: VolumeRow[]
+  collected_at: string
+}
+
+export interface SymbolMasterSnapshot {
+  symbols: SymbolEntry[]
+  count: number
   collected_at: string
 }
 
@@ -85,7 +111,11 @@ export interface Backtest {
 export interface AccountSnapshot {
   broker_source: string
   broker_error: string | null
+  account_label: string
+  account_number: string
   cash: number
+  krw_cash: number
+  usd_cash: number
   market_value: number
   total_value: number
   prices: Record<string, number>
