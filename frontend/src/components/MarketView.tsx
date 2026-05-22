@@ -1,9 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type {
   AccountSnapshot,
   MarketSnapshot,
@@ -65,8 +60,7 @@ export default function MarketView({
     try {
       const result = await fetchMarket(selectedSymbol, period)
       setData(result)
-      if (result.selected_symbol) {
-        onSelectedSymbolChange(result.selected_symbol)
+      if (selectedSymbol && result.selected_symbol) {
         setNavSearchInput(displayName(result.selected_symbol, result.quote?.name))
       }
     } catch (error) {
@@ -74,7 +68,7 @@ export default function MarketView({
     } finally {
       setChartLoading(false)
     }
-  }, [selectedSymbol, period, show, onSelectedSymbolChange, setNavSearchInput])
+  }, [selectedSymbol, period, show, setNavSearchInput])
 
   const loadAccount = useCallback(async () => {
     try {
@@ -83,7 +77,6 @@ export default function MarketView({
       show((error as Error).message, 'error')
     }
   }, [show])
-
 
   useEffect(() => {
     setChartLoading(true)
@@ -95,7 +88,6 @@ export default function MarketView({
   usePolling(load, 10000)
   usePolling(loadAccount, 15000)
 
-  const selected = data?.selected_symbol ?? selectedSymbol
   const marketStatus = getMarketStatus()
   const collectedAt = data ? formatCollectedAt(new Date(data.collected_at)) : ''
   const ranking = useMemo(() => {
@@ -103,81 +95,148 @@ export default function MarketView({
       (a, b) => tradingValue(b) - tradingValue(a),
     )
   }, [data?.top_volume])
+  const selected = selectedSymbol || ranking[0]?.symbol || data?.selected_symbol || ''
+  const selectedDataReady = Boolean(
+    selected && data?.selected_symbol === selected,
+  )
+
+  useEffect(() => {
+    const first = ranking[0]
+    if (!selectedSymbol && first && data?.selected_symbol !== first.symbol) {
+      onSelectedSymbolChange(first.symbol)
+      setNavSearchInput(displayName(first.symbol, first.name))
+    }
+  }, [
+    data?.selected_symbol,
+    onSelectedSymbolChange,
+    ranking,
+    selectedSymbol,
+    setNavSearchInput,
+  ])
+
+  function selectSymbol(symbol: string, name?: string) {
+    onSelectedSymbolChange(symbol)
+    setNavSearchInput(displayName(symbol, name))
+  }
 
   return (
     <div className="toss-market-screen">
-      
-
       <div className="toss-market-board">
         <section className="panel ranking-panel">
           <div className="ranking-head">
             <div>
-              <h2>실시간 차트</h2>
               <div className="market-status">
-                <span className={`market-pill ${marketStatus.isOpen ? 'open' : 'closed'}`}>
+                <span
+                  className={`market-pill ${marketStatus.isOpen ? 'open' : 'closed'}`}
+                >
                   {marketStatus.label}
                 </span>
-                {collectedAt && <span className="market-detail">오늘 {collectedAt} 기준</span>}
+                {collectedAt && (
+                  <span className="market-detail">오늘 {collectedAt} 기준</span>
+                )}
               </div>
             </div>
             <div className="ranking-tabs">
-              <button type="button" className="secondary active">토스증권 거래대금</button>
-              <button type="button" className="secondary">실시간</button>
-            </div>
-          </div>
-          <div className="ranking-table" role="table" aria-label="거래대금 순위">
-            <div className="ranking-row ranking-row-head" role="row">
-              <span>순위</span>
-              <span>종목</span>
-              <span>현재가</span>
-              <span>등락률</span>
-              <span>거래대금</span>
-              <span>거래량</span>
-            </div>
-            {ranking.length === 0 ? (
-              <EmptyItem text="순위 데이터를 불러오는 중입니다." />
-            ) : (
-              ranking.map((row, index) => (
-                <RankingRow
-                  key={row.symbol}
-                  row={row}
-                  rank={index + 1}
-                  selected={selected === row.symbol}
-                  onSelect={() => onSelectedSymbolChange(row.symbol)}
-                />
-              ))
-            )}
-          </div>
-        </section>
-
-        <section className="panel selected-stock-panel">
-          <SelectedQuote data={data} />
-          <div className="periods" aria-label="차트 기간">
-            {PERIODS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={`secondary ${period === item.id ? 'active' : ''}`}
-                onClick={() => setPeriod(item.id)}
-              >
-                {item.label}
+              <button type="button" className="secondary active">
+                토스증권 거래대금
               </button>
-            ))}
+              <button type="button" className="secondary">
+                실시간
+              </button>
+            </div>
           </div>
-          <PriceChart points={data?.chart ?? []} period={period} loading={chartLoading} />
-          <OrderbookPanel
-            symbol={selected}
-            name={data?.quote?.name}
-            currentPrice={data?.quote?.price}
-            onOrderPlaced={() => {
-              void load()
-              void loadAccount()
-            }}
-          />
+          <div className="market-list-detail">
+            <div
+              className="ranking-table"
+              role="table"
+              aria-label="거래대금 순위"
+            >
+              <div className="ranking-row ranking-row-head" role="row">
+                <span>순위</span>
+                <span>종목</span>
+                <span>현재가</span>
+                <span>등락률</span>
+                <span>거래대금</span>
+                <span>거래량</span>
+              </div>
+              {ranking.length === 0 ? (
+                <RankingSkeleton />
+              ) : (
+                ranking.map((row, index) => (
+                  <RankingRow
+                    key={row.symbol}
+                    row={row}
+                    rank={index + 1}
+                    selected={selected === row.symbol}
+                    onSelect={() => selectSymbol(row.symbol, row.name)}
+                  />
+                ))
+              )}
+            </div>
+            <aside className="selected-stock-panel selected-side-panel">
+              {selected ? (
+                <>
+                <div className="selected-panel-head">
+                  <SelectedQuote
+                    data={selectedDataReady ? data : null}
+                    fallbackSymbol={selected}
+                  />
+                </div>
+                <div className="selected-trading-grid">
+                  <div className="selected-chart-area">
+                    <div className="periods" aria-label="차트 기간">
+                      {PERIODS.map((item) => (
+                        <button
+                          key={item.id}
+                          type="button"
+                          className={`secondary ${period === item.id ? 'active' : ''}`}
+                          onClick={() => setPeriod(item.id)}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                    <PriceChart
+                      points={selectedDataReady ? (data?.chart ?? []) : []}
+                      period={period}
+                      loading={chartLoading || !selectedDataReady}
+                    />
+                  </div>
+                  <OrderbookPanel
+                    symbol={selected}
+                    name={selectedDataReady ? data?.quote?.name : undefined}
+                    currentPrice={selectedDataReady ? data?.quote?.price : undefined}
+                    onOrderPlaced={() => {
+                      void load()
+                      void loadAccount()
+                    }}
+                  />
+                </div>
+                </>
+              ) : (
+                <EmptyItem text="차트 정보를 불러오는 중입니다." />
+              )}
+            </aside>
+          </div>
         </section>
 
         <AccountSidePanel account={account} />
       </div>
+    </div>
+  )
+}
+
+function RankingSkeleton() {
+  return (
+    <div className="ranking-skeleton" aria-label="순위 데이터를 불러오는 중">
+      {Array.from({ length: 8 }, (_, index) => (
+        <div className="ranking-row ranking-skeleton-row" key={index}>
+          <span className="skeleton-line short" />
+          <span className="skeleton-line wide" />
+          <span className="skeleton-line" />
+          <span className="skeleton-line" />
+        </div>
+      ))}
     </div>
   )
 }
@@ -215,14 +274,31 @@ function RankingRow({
   )
 }
 
-function SelectedQuote({ data }: { data: MarketSnapshot | null }) {
-  if (!data?.quote) return <EmptyItem text="표시할 종목이 없습니다." />
+function SelectedQuote({
+  data,
+  fallbackSymbol,
+}: {
+  data: MarketSnapshot | null
+  fallbackSymbol: string
+}) {
+  if (!data?.quote) {
+    return (
+      <div className="selected-quote">
+        <div>
+          <strong>{fallbackSymbol}</strong>
+          <span>종목 정보를 불러오는 중입니다.</span>
+        </div>
+      </div>
+    )
+  }
   const quote = data.quote
   return (
     <div className="selected-quote">
       <div>
         <strong>{quote.name || quote.symbol}</strong>
-        <span>{quote.symbol} · {dateTime.format(new Date(quote.time))}</span>
+        <span>
+          {quote.symbol} · {dateTime.format(new Date(quote.time))}
+        </span>
       </div>
       <div>
         <strong>{money.format(quote.price)}원</strong>
@@ -275,9 +351,15 @@ function AccountSidePanel({ account }: { account: AccountSnapshot | null }) {
       <section className="panel orders-box">
         <h2>주문내역</h2>
         <div className="order-tabs">
-          <button type="button" className="secondary active">대기</button>
-          <button type="button" className="secondary">완료</button>
-          <button type="button" className="secondary">조건주문</button>
+          <button type="button" className="secondary active">
+            대기
+          </button>
+          <button type="button" className="secondary">
+            완료
+          </button>
+          <button type="button" className="secondary">
+            조건주문
+          </button>
         </div>
         <div className="side-list">
           {(account?.trades ?? []).length === 0 ? (
@@ -298,7 +380,9 @@ function HoldingRow({ position }: { position: Position }) {
     <div className="holding-row">
       <div>
         <strong>{position.name || position.symbol}</strong>
-        <span>{position.qty}주 · 평균 {money.format(position.avg_price)}원</span>
+        <span>
+          {position.qty}주 · 평균 {money.format(position.avg_price)}원
+        </span>
       </div>
       <div>
         <strong>{money.format(position.value ?? 0)}원</strong>
@@ -314,8 +398,12 @@ function OrderRow({ trade }: { trade: Trade }) {
   return (
     <div className="holding-row">
       <div>
-        <strong>{trade.action} {trade.symbol}</strong>
-        <span>{trade.qty}주 · {trade.reason}</span>
+        <strong>
+          {trade.action} {trade.symbol}
+        </strong>
+        <span>
+          {trade.qty}주 · {trade.reason}
+        </span>
       </div>
       <div>
         <strong>{money.format(trade.price)}원</strong>

@@ -157,9 +157,7 @@ export default function App() {
             <MarketView
               selectedSymbol={selectedSymbol}
               onSelectedSymbolChange={setSelectedSymbol}
-              setNavSearchInput={(next) => {
-                if (!initializedSearchInput.current) setSearchInput(next)
-              }}
+              setNavSearchInput={setSearchInput}
             />
           ) : (
             <TradingView />
